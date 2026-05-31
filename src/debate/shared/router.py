@@ -9,12 +9,18 @@ used.
 
 The cache key is the normalized query string (case-folded, internal
 whitespace collapsed). Cache size is configurable; default 128.
+
+Stage 9 adds a thin :meth:`ToolRouter.call` dispatcher on top so the
+Judge can route ``tool_call`` envelopes coming from child agents
+without each caller having to know which Python method backs each
+tool name. Unknown tool names are rejected with the typed
+:class:`UnknownToolError`.
 """
 
 from __future__ import annotations
 
 from collections import OrderedDict
-from typing import Final
+from typing import Any, Final
 
 from debate.sdk.search_client import (
     MAX_RESULTS_PER_RESPONSE,
@@ -24,6 +30,30 @@ from debate.sdk.search_client import (
 from debate.shared.gatekeeper import Gatekeeper
 
 DEFAULT_CACHE_SIZE: Final[int] = 128
+
+SEARCH_TOOL_NAME: Final[str] = "search"
+"""Canonical tool name for the search tool. Mirrors
+:data:`debate.agents.debater_agent.SEARCH_TOOL_NAME` so child agents
+and the parent's router agree on the wire identifier."""
+
+KNOWN_TOOLS: frozenset[str] = frozenset({SEARCH_TOOL_NAME})
+"""Set of tool names :meth:`ToolRouter.call` knows how to dispatch.
+
+Adding a new tool means extending this set *and* the dispatcher in
+:meth:`ToolRouter.call`. Anything else raises :class:`UnknownToolError`.
+"""
+
+
+class UnknownToolError(ValueError):
+    """Raised by :meth:`ToolRouter.call` for unknown tool names.
+
+    Carries the offending ``tool_name`` so callers can branch on it
+    or include it in a ``tool_result`` error envelope.
+    """
+
+    def __init__(self, tool_name: str) -> None:
+        super().__init__(f"unknown tool: {tool_name!r}; known tools are {sorted(KNOWN_TOOLS)}")
+        self.tool_name: str = tool_name
 
 
 class _LRUCache:
@@ -100,6 +130,37 @@ class ToolRouter:
         results: list[SearchResult] = list(response.results)[:MAX_RESULTS_PER_RESPONSE]
         self._cache.set(key, results)
         return list(results)
+
+    def call(self, tool_name: str, **kwargs: Any) -> dict[str, Any]:
+        """Dispatch a named tool call and return a JSON-friendly payload.
+
+        This is the single entry point used by the Judge to route
+        ``tool_call`` envelopes coming from child agents (Stage 9).
+        Each known tool returns a dict that is safe to embed
+        verbatim in a ``tool_result`` :class:`Message` payload.
+
+        The dispatcher is intentionally narrow:
+
+        - ``"search"`` requires a ``query: str`` keyword argument and
+          returns ``{"tool": "search", "results": [...]}``;
+        - any other name raises :class:`UnknownToolError`.
+
+        Errors from the underlying tool (e.g. budget violations,
+        invalid arguments) propagate unchanged - the caller decides
+        how to translate them into a ``tool_result`` payload.
+        """
+        if tool_name == SEARCH_TOOL_NAME:
+            query = kwargs.get("query")
+            if not isinstance(query, str) or not query.strip():
+                raise ValueError("search tool requires a non-empty 'query' string argument")
+            results = self.search(query)
+            return {
+                "tool": SEARCH_TOOL_NAME,
+                "results": [
+                    {"title": r.title, "url": r.url, "snippet": r.snippet} for r in results
+                ],
+            }
+        raise UnknownToolError(tool_name)
 
     @property
     def cache_size(self) -> int:

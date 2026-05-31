@@ -16,7 +16,7 @@ from debate.shared.gatekeeper import (
     Gatekeeper,
     GatekeeperPolicy,
 )
-from debate.shared.router import ToolRouter
+from debate.shared.router import KNOWN_TOOLS, SEARCH_TOOL_NAME, ToolRouter, UnknownToolError
 
 
 class CountingSearchClient:
@@ -196,3 +196,68 @@ class TestRouterGatekeeperIntegration:
         router.clear_cache()
         router.search("q")
         assert client.calls == ["q", "q"]
+
+
+class TestRouterCallDispatcher:
+    """Stage 9: ``ToolRouter.call(tool_name, ...)`` is the typed
+    dispatcher the Judge uses to route ``tool_call`` envelopes from
+    children. Unknown names raise :class:`UnknownToolError`."""
+
+    def test_known_tools_includes_search(self) -> None:
+        assert SEARCH_TOOL_NAME == "search"
+        assert SEARCH_TOOL_NAME in KNOWN_TOOLS
+
+    def test_call_search_returns_serializable_payload(self) -> None:
+        router, _, _ = _make_router()
+        payload = router.call("search", query="kubernetes operators")
+        assert payload["tool"] == "search"
+        assert isinstance(payload["results"], list)
+        assert payload["results"], "search must return at least one result with a non-empty client"
+        first = payload["results"][0]
+        assert set(first.keys()) == {"title", "url", "snippet"}
+        for key, val in first.items():
+            assert isinstance(val, str), f"{key!r} must be a JSON-friendly string"
+
+    def test_call_search_uses_cache(self) -> None:
+        router, client, _ = _make_router()
+        router.call("search", query="ai ethics")
+        router.call("search", query="ai ethics")
+        assert client.calls == ["ai ethics"], (
+            "ToolRouter.call must reuse the LRU cache established by .search()"
+        )
+
+    def test_unknown_tool_raises_unknown_tool_error(self) -> None:
+        router, _, _ = _make_router()
+        with pytest.raises(UnknownToolError) as ei:
+            router.call("calculator", expr="1+1")
+        assert ei.value.tool_name == "calculator"
+        assert "calculator" in str(ei.value)
+        # And known tools are listed in the message.
+        assert SEARCH_TOOL_NAME in str(ei.value)
+
+    def test_unknown_tool_does_not_call_search_client(self) -> None:
+        router, client, _ = _make_router()
+        with pytest.raises(UnknownToolError):
+            router.call("nonexistent", x=1)
+        assert client.calls == []
+
+    def test_search_call_rejects_missing_query(self) -> None:
+        router, _, _ = _make_router()
+        with pytest.raises(ValueError):
+            router.call("search")
+
+    def test_search_call_rejects_blank_query(self) -> None:
+        router, _, _ = _make_router()
+        with pytest.raises(ValueError):
+            router.call("search", query="   ")
+
+    def test_search_call_rejects_non_string_query(self) -> None:
+        router, _, _ = _make_router()
+        with pytest.raises(ValueError):
+            router.call("search", query=123)
+
+    def test_unknown_tool_error_is_value_error(self) -> None:
+        """UnknownToolError subclasses ValueError so callers can use
+        a single ``except ValueError`` for all bad-argument paths if
+        they prefer not to discriminate."""
+        assert issubclass(UnknownToolError, ValueError)

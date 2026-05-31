@@ -37,12 +37,20 @@ from debate.shared.redaction import (
     is_sensitive_key,
     redact,
 )
-from debate.shared.router import DEFAULT_CACHE_SIZE, ToolRouter
+from debate.shared.router import (
+    DEFAULT_CACHE_SIZE,
+    KNOWN_TOOLS,
+    SEARCH_TOOL_NAME,
+    ToolRouter,
+    UnknownToolError,
+)
 from debate.shared.secrets import Secrets, load_secrets, maybe_load_dotenv
 
 __all__ = [
     "DEFAULT_CACHE_SIZE",
+    "KNOWN_TOOLS",
     "REDACTION_PLACEHOLDER",
+    "SEARCH_TOOL_NAME",
     "SENSITIVE_KEY_TOKENS",
     "BudgetExceededError",
     "BudgetKind",
@@ -55,6 +63,7 @@ __all__ = [
     "RunLogger",
     "Secrets",
     "ToolRouter",
+    "UnknownToolError",
     "default_debate_config_path",
     "default_motions_path",
     "is_sensitive_key",

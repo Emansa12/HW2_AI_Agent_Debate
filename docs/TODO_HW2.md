@@ -24,21 +24,31 @@
 | 6     | Supervisor / child process manager + integration smoke                           | DONE                                   |
 | 7     | BaseAgent, DebaterAgent, ProAgent, ConAgent                                      | DONE                                   |
 | 8     | Watchdog / liveness monitor                                                      | DONE                                   |
-| 9     | Judge debate flow + verdict pipeline                                             | NOT STARTED                            |
+| 9     | Judge debate flow + verdict pipeline                                             | DONE                                   |
 | 10    | End-to-end debate loop, transcript, CLI, polish                                  | NOT STARTED                            |
 
-**Latest gate run** (Sunday 2026-05-31, 23:03 UTC+3 — Stage 8 audit):
+**Latest gate run** (Sunday 2026-05-31, 23:24 UTC+3 — after Stage 9):
 
 ```
-uv sync                       Resolved 15 packages in 1ms / Checked 15 packages in 110ms
-uv run pytest -q              446 passed in 3.16s
+uv sync                       Resolved 15 packages in 1ms / Checked 15 packages in 2ms
+uv run pytest -q              515 passed in 2.68s
 uv run ruff check .           All checks passed!
-uv run ruff format --check .  63 files already formatted
+uv run ruff format --check .  66 files already formatted
 ```
 
-Stage 8 sub-suite re-run (`tests/unit/test_watchdog.py` +
-`tests/integration/test_recovery_chaos.py`): **44 passed in 0.98s**
-(42 unit + 2 integration), confirming Stage 8 is DONE.
+Stage 9 added **69 new tests** on top of the 446 from Stages 1–8:
+
+- `tests/unit/test_judge_agent.py` — 58 tests (construction, init /
+  prompt building, reply validation, scoring, verdict
+  parse / validate / tie-break, run_turn dispatcher, full
+  `run_debate` E2E with FakeSupervisor, verdict retry path,
+  stage-boundary import / IO checks).
+- `tests/integration/test_judge_debate_flow.py` — 2 tests (offline
+  2-round debate driving a real `RunLogger` to disk + clean
+  cleanup).
+- `tests/unit/test_router_cache.py::TestRouterCallDispatcher` —
+  9 tests for the new `ToolRouter.call()` + `UnknownToolError`
+  surface.
 
 **Open audit findings** (no source-code changes were made for these — they
 will be addressed when the relevant stage that needs them lands):
@@ -52,22 +62,23 @@ will be addressed when the relevant stage that needs them lands):
    shape is currently expressed only as a Pydantic model
    (`debate.sdk.schemas.Verdict`). The JSON Schema mirror was not
    produced.
-3. `ToolRouter` exposes only `.search(query)`; there is no
+3. ~~`ToolRouter` exposes only `.search(query)`; there is no
    `router.call(tool_name, ...)` dispatcher with an explicit
-   `UnknownToolError`. Unknown tools are rejected only implicitly
-   (no public method exists for them). A future stage that handles
-   incoming `tool_call` envelopes from agents will need to add the
-   explicit rejection path.
+   `UnknownToolError`.~~ **CLOSED in Stage 9.** `ToolRouter.call(...)`
+   is now the typed dispatcher used by the Judge to route
+   `tool_call` envelopes from children; unknown names raise
+   `UnknownToolError` (subclass of `ValueError`); covered by
+   `tests/unit/test_router_cache.py::TestRouterCallDispatcher`.
 4. The Stage 1 layout sketch folders
    `src/debate/{config,gatekeeper,ipc,judge,prompts,utils,watchdog}/`
    still exist with short placeholder modules. The real code lives
    under `src/debate/{sdk,shared,orchestration,agents}/` and a
    project-wide grep confirms **nothing imports the placeholder
-   folders**. After Stage 8 the Watchdog real home is
-   `src/debate/orchestration/watchdog.py`; the placeholder
-   `src/debate/watchdog/` is now strictly redundant. All of these
-   are harmless but should be removed in a tidy-up pass alongside
-   Stage 10.
+   folders**. After Stage 9 the Judge real home is
+   `src/debate/orchestration/judge.py`; the placeholder
+   `src/debate/judge/` (alongside `src/debate/watchdog/`) is now
+   strictly redundant. All of these are harmless but should be
+   removed in a tidy-up pass alongside Stage 10.
 
 ---
 
@@ -478,31 +489,154 @@ will be addressed when the relevant stage that needs them lands):
 
 
 
-## Stage 9 — Judge debate flow + verdict pipeline (NOT STARTED)
+## Stage 9 — Judge debate flow + verdict pipeline
 
-- [ ] `JudgeAgent` with verdict prompt
-- [ ] JSON-only verdict output; ties rejected on the wire
-- [ ] Validate-verdict loop wired to the FSM
-  (`VERDICT` → `VALIDATE_VERDICT` → retry / `TIE_BREAK`)
-- [ ] Deterministic tie-break in `TIE_BREAK`
-- [ ] Final `verdict` envelope is the last record in `run.jsonl`
-- [ ] Existing `src/debate/judge/judge.py` is still a Stage 1
-      placeholder
+- [x] `src/debate/orchestration/judge.py`
+  - [x] `Judge` class - parent / central controller; the only
+        process that talks to Pro and Con. Children never
+        communicate directly: every byte that reaches a child first
+        passed through the Judge as a `Role.JUDGE` envelope. Tested
+        by
+        `test_judge_agent.py::TestRunDebate::test_pro_never_receives_con_envelope`
+        which inspects every `supervisor.send` call in a full debate
+        and asserts they all carry `role=Role.JUDGE`
+  - [x] Constructor takes `supervisor`, `fsm`, `router`,
+        `gatekeeper`, `llm_client`, optional `logger`,
+        `motion`, `max_tokens_per_turn`, `per_turn_timeout_sec`,
+        `receive_max_iters`, `clock` (matches the API requested by
+        the spec)
+  - [x] `run_debate(motion, rounds=None) -> Verdict` drives the FSM
+        through every transition in
+        `state_machine.py`: `START` → `CHILDREN_READY` → openings
+        → `SENT_OPENINGS` → N × (`PRO_REPLY` → `SCORED` →
+        `CON_REPLY` → `SCORED` → `SCORED`/`ROUND_LIMIT_REACHED`)
+        → closings → `CLOSINGS_RECEIVED` → verdict pipeline
+  - [x] `build_init(role, motion)` and `build_prompt(role, phase,
+        context, opponent_last)` build `Message` envelopes; the
+        Judge always sends as `Role.JUDGE`. `build_prompt` rejects
+        being passed a `Message` as `opponent_last` (TypeError) so
+        the only thing the other side ever sees is the *content
+        string*, not the original envelope
+  - [x] `run_turn(role, phase, opponent_last)` sends a prompt and
+        receives one reply, servicing in-line `tool_call`
+        iterations through `ToolRouter.call(...)` (Stage 9 added
+        the `call` dispatcher with `UnknownToolError`); bounded by
+        `DEFAULT_RECEIVE_MAX_ITERS` so a babbling child cannot
+        burn budget forever
+  - [x] `validate_child_reply(message, expected_role)` rejects:
+        wrong sender role, wrong message type, empty / whitespace
+        content, stance mismatch, invalid expected role - tested
+        with one test per failure mode
+  - [x] `score_turn(role, reply, round_number)` is deterministic
+        and content-length-derived, capped so a single huge reply
+        cannot dominate (covered by
+        `TestScoring::test_score_capped`)
+  - [x] `generate_verdict()` calls the LLM through the Gatekeeper
+        and parses strict JSON (handles ```json fences and prose
+        wrappers); failure is surfaced as `InvalidVerdictError`
+        so the FSM `invalid_or_tie` retry path engages
+  - [x] `validate_verdict(verdict)` enforces: winner ∈ {pro, con}
+        (already schema-forbidden but double-checked), `scores`
+        dict with both sides as numerics, ≥ `MIN_VERDICT_REASONS`
+        (= 3) non-empty reason strings
+  - [x] `apply_tie_breaker(scores)` — higher cumulative score
+        wins; on exact tie `con` wins by deterministic rule;
+        always returns a verdict that itself passes
+        `validate_verdict`
+  - [x] Verdict pipeline retries once on invalid output, then
+        falls back to `apply_tie_breaker`; covered by
+        `TestVerdictRetryPath` (`first_invalid_then_valid`,
+        `two_invalid_triggers_tie_breaker`,
+        `tie_break_with_equal_cumulative_picks_con`)
+- [x] `tool_call` routing through Gatekeeper + ToolRouter (closes
+      open finding #3)
+  - [x] `src/debate/shared/router.py::ToolRouter.call(tool_name,
+        ...)` — single typed dispatch entry point
+  - [x] `UnknownToolError` (subclass of `ValueError`) for any
+        tool name not in `KNOWN_TOOLS` (Stage 9 only knows
+        `"search"`); `tool_result` payloads stamp
+        `error="unknown_tool"`
+  - [x] Children **cannot** call `SearchClient` directly: the
+        Stage 6 supervisor env allow-list strips
+        `SEARCH_API_KEY`, and the Stage 7 import-boundary tests
+        confirm `debate.agents.*` does not import
+        `debate.sdk.search_client` or `debate.shared.router`. The
+        Judge is the only process that ever instantiates a
+        `ToolRouter`
+- [x] Logging via the duck-typed `RunLogger`-compatible logger
+      (Judge events are written on the `"judge"` channel):
+      `debate_started`, `children_spawned`, `init_sent`,
+      `prompt_sent`, `reply_received`, `tool_call_received`,
+      `tool_result_sent`, `score_recorded`, `verdict_llm_response`,
+      `verdict_invalid`, `verdict_recorded`, `debate_done`,
+      `turn_failed`, `spawn_failed`. Logger errors are swallowed
+      defensively so a buggy logger cannot crash a debate. No
+      secrets are emitted, and the existing
+      `debate.shared.redaction` substring scrubber would catch any
+      accidental sensitive key anyway
+- [x] Stage boundary enforced statically:
+  - [x] `judge.py` does not import `debate.agents.*` (verified by
+        AST walk in `TestStageBoundary::test_judge_does_not_import_agent_modules`)
+  - [x] `judge.py` does not import `subprocess`, `socket`,
+        `httpx`, `requests`, or `urllib`
+  - [x] `judge.py` does not call `json.dumps` (every outgoing
+        envelope goes through the Stage 2 IPC helpers via
+        `Supervisor.send`)
+  - [x] `judge.py` does not touch `sys.stdin`/`sys.stdout`/
+        `sys.stderr` directly
+- [x] Verdict envelope is schema-validated; `Verdict.winner` is
+      `Literal["pro", "con"]` so ties are flat-out impossible on
+      the wire (Stage 2 invariant, exercised again by
+      `test_judge_agent.py::TestVerdictParseAndValidate::test_tie_winner_rejected_at_schema`)
+
+**Evidence — Stage 9**
+
+- Files:
+  - `src/debate/orchestration/judge.py` (new, 642 LOC after
+    formatting)
+  - `src/debate/orchestration/__init__.py` (re-exports `Judge`,
+    `DebateHistory`, `TurnRecord`, `JudgeError`,
+    `InvalidReplyError`, `InvalidVerdictError`, and the new
+    Stage 9 default constants)
+  - `src/debate/shared/router.py` (added `ToolRouter.call`,
+    `UnknownToolError`, `KNOWN_TOOLS`, `SEARCH_TOOL_NAME`)
+  - `src/debate/shared/__init__.py` (re-exports the new symbols)
+- Tests:
+  - `tests/unit/test_judge_agent.py` (new, 58 tests)
+  - `tests/integration/test_judge_debate_flow.py` (new, 2 tests
+    — offline 2-round debate writing a real `RunLogger`
+    transcript to a tmp dir)
+  - `tests/unit/test_router_cache.py::TestRouterCallDispatcher`
+    (new, 9 tests covering the `ToolRouter.call` /
+    `UnknownToolError` surface)
+- Latest gate run (2026-05-31 23:24 UTC+3): **515 passed in 2.68s**
+  (446 carried over from Stages 1–8 + 69 new Stage 9 tests),
+  ruff `All checks passed!`, ruff format `66 files already
+  formatted`
+- Stage boundary verified: the Judge has no imports from
+  `debate.agents.*`, no direct `subprocess` / `httpx` / `requests`
+  imports, no `json.dumps`, no `sys.stdin`/`sys.stdout` access.
+  The `src/debate/judge/judge.py` Stage 1 placeholder is still
+  the unused 4-line stub (cleanup deferred to Stage 10 — see
+  open finding #4).
 
 ## Stage 10 — End-to-end debate loop, transcript, CLI, polish (NOT STARTED)
 
-- [ ] Debate loop driver wiring FSM ↔ Supervisor ↔ ToolRouter ↔
-      RunLogger
-- [ ] `tool_call` dispatcher with explicit `UnknownToolError`
-      (closes open finding #3)
-- [ ] Transcript writer feeds `RunLogger` from the loop
-- [ ] CLI flags: `--motion`, `--rounds`, `--model`, `--seed`
-- [ ] End-to-end run with `FakeLLMClient` + `FakeSearchClient`
+- [ ] CLI flags: `--motion`, `--rounds`, `--model`, `--seed` and a
+      `debate` console script wired to a real `Judge` run
+- [ ] End-to-end run on real `subprocess.Popen` children running
+      `python -m debate.agents.pro_agent` / `con_agent` (today
+      Judge integration is exercised against an in-memory
+      `FakeSupervisor`)
+- [ ] Watchdog → FSM bridge: turn `Watchdog.on_miss` into
+      `Event.HEARTBEAT_MISS` and orchestrate `respawn` /
+      `restarts_exhausted` around the per-turn loop
 - [ ] Final docs pass (PRD / PLAN / TODO / README)
 - [ ] Backlog cleanup: remove dead Stage 1 layout sketch folders
       (`src/debate/{config,gatekeeper,ipc,judge,prompts,utils,watchdog}/`
       after their real homes are confirmed)
 - [ ] Backlog cleanup: add `runs/.gitkeep` + `runs/*` /
-      `!runs/.gitkeep` to `.gitignore` (closes open findings #1)
+      `!runs/.gitkeep` to `.gitignore` (closes open finding #1)
 - [ ] Backlog cleanup: emit `config/prompts/verdict.schema.json`
-      mirror of the `Verdict` Pydantic model (closes open finding #2)
+      mirror of the `Verdict` Pydantic model (closes open
+      finding #2)
