@@ -1,0 +1,508 @@
+# TODO — HW2: AI Agent Debate
+
+> Per-stage checklist, kept in sync with the actual repository state.
+> See [`PLAN_HW2.md`](PLAN_HW2.md) for architecture and rationale, and
+> [`PRD_HW2.md`](PRD_HW2.md) for the high-level brief.
+>
+> Legend:
+> `[x]` = verified done (file / test / runtime check passes)
+> `[~]` = partial — see note on the same line
+> `[ ]` = not started yet
+>
+> The build order in this file is the order things were actually
+> shipped, which is **not** the same as the old planning numbering.
+
+## Current verified status
+
+| Stage | Scope                                                                            | Status                                 |
+|-------|----------------------------------------------------------------------------------|----------------------------------------|
+| 1     | Project skeleton, configs, placeholders, docs                                    | DONE with gaps (see PARTIAL items)     |
+| 2     | Pydantic schemas + JSONL IPC helpers                                             | DONE                                   |
+| 3     | Config + secrets + structured logging + redaction                                | DONE                                   |
+| 4     | Fake LLM / Search clients + Ledger + Gatekeeper + ToolRouter (with LRU cache)    | DONE with one PARTIAL                  |
+| 5     | Pure deterministic debate state machine (FSM)                                    | DONE                                   |
+| 6     | Supervisor / child process manager + integration smoke                           | DONE                                   |
+| 7     | BaseAgent, DebaterAgent, ProAgent, ConAgent                                      | DONE                                   |
+| 8     | Watchdog / liveness monitor                                                      | DONE                                   |
+| 9     | Judge debate flow + verdict pipeline                                             | NOT STARTED                            |
+| 10    | End-to-end debate loop, transcript, CLI, polish                                  | NOT STARTED                            |
+
+**Latest gate run** (Sunday 2026-05-31, 23:03 UTC+3 — Stage 8 audit):
+
+```
+uv sync                       Resolved 15 packages in 1ms / Checked 15 packages in 110ms
+uv run pytest -q              446 passed in 3.16s
+uv run ruff check .           All checks passed!
+uv run ruff format --check .  63 files already formatted
+```
+
+Stage 8 sub-suite re-run (`tests/unit/test_watchdog.py` +
+`tests/integration/test_recovery_chaos.py`): **44 passed in 0.98s**
+(42 unit + 2 integration), confirming Stage 8 is DONE.
+
+**Open audit findings** (no source-code changes were made for these — they
+will be addressed when the relevant stage that needs them lands):
+
+1. `runs/.gitkeep` and a `runs/* except !runs/.gitkeep` rule in
+   `.gitignore` were never created. The runtime `RunLogger` does
+   `runs/<run_id>/`.mkdir at first use, so the missing directory does
+   not break code, but the explicit gitkeep pattern from the spec is
+   absent.
+2. `config/prompts/verdict.schema.json` does not exist. The verdict
+   shape is currently expressed only as a Pydantic model
+   (`debate.sdk.schemas.Verdict`). The JSON Schema mirror was not
+   produced.
+3. `ToolRouter` exposes only `.search(query)`; there is no
+   `router.call(tool_name, ...)` dispatcher with an explicit
+   `UnknownToolError`. Unknown tools are rejected only implicitly
+   (no public method exists for them). A future stage that handles
+   incoming `tool_call` envelopes from agents will need to add the
+   explicit rejection path.
+4. The Stage 1 layout sketch folders
+   `src/debate/{config,gatekeeper,ipc,judge,prompts,utils,watchdog}/`
+   still exist with short placeholder modules. The real code lives
+   under `src/debate/{sdk,shared,orchestration,agents}/` and a
+   project-wide grep confirms **nothing imports the placeholder
+   folders**. After Stage 8 the Watchdog real home is
+   `src/debate/orchestration/watchdog.py`; the placeholder
+   `src/debate/watchdog/` is now strictly redundant. All of these
+   are harmless but should be removed in a tidy-up pass alongside
+   Stage 10.
+
+---
+
+## Stage 1 — Project skeleton
+
+- [x] `pyproject.toml` (uv + pytest + ruff; PEP 735 `[dependency-groups].dev`)
+- [x] `src/debate/` package layout, importable
+- [x] `uv run python -m debate.main` placeholder banner returns 0
+- [x] `tests/test_smoke.py` (verifies version + banner)
+- [x] `README.md`
+- [x] `PROMPTS.md`
+- [x] `.env-example` (only placeholder values, no real secrets)
+- [x] `.gitignore` ignores `.env`, `.venv/`, caches, `.ruff_cache/`,
+      `.pytest_cache/`
+- [x] `config/debate.json`
+- [x] `config/motions.json`
+- [x] `docs/PRD_HW2.md`, `docs/PLAN_HW2.md`, `docs/TODO_HW2.md`
+- [x] `tests/unit/` and `tests/integration/` directories
+- [x] `pro.py` / `con.py` renamed to `pro_agent.py` / `con_agent.py`
+      (Windows reserved-name fix for `CON`)
+- [x] No `debate_app` references anywhere in the tree
+      (verified by repo-wide grep)
+- [ ] `runs/.gitkeep` exists — **NOT DONE** (see open finding #1)
+- [~] `.gitignore` excludes `runs/*` except `runs/.gitkeep`
+      — **PARTIAL**: caches and `.env` are excluded, but no
+      `runs/*` + `!runs/.gitkeep` rule was added
+- [ ] `config/prompts/verdict.schema.json` exists — **NOT DONE**
+      (see open finding #2)
+
+**Evidence — Stage 1**
+
+- Files: `pyproject.toml`, `README.md`, `PROMPTS.md`, `.env-example`,
+  `.gitignore`, `config/debate.json`, `config/motions.json`,
+  `src/debate/__init__.py`, `src/debate/__main__.py`,
+  `src/debate/main.py`, `docs/PRD_HW2.md`, `docs/PLAN_HW2.md`.
+- Tests: `tests/test_smoke.py::test_package_has_version`,
+  `tests/test_smoke.py::test_main_returns_zero`.
+- Latest run: `uv run python -m debate.main` exits 0, prints
+  "Stage 1 OK".
+
+---
+
+## Stage 2 — Pydantic schemas + JSONL IPC
+
+- [x] `src/debate/sdk/schemas.py` with:
+  - [x] `Role` (`judge`, `pro`, `con`) as `StrEnum`
+  - [x] `MessageType` covering `init`, `prompt`, `reply`, `tool_call`,
+        `tool_result`, `ping`, `pong`, `score`, `verdict`, `event`,
+        `shutdown`
+  - [x] `Phase` covering `opening`, `argument`, `closing`
+  - [x] `Message` envelope with `v`, `ts`, `turn_id`, `role`, `type`,
+        `payload` (`extra="forbid"`)
+  - [x] `Verdict` payload with `winner ∈ {pro, con}` (ties forbidden)
+- [x] `src/debate/orchestration/ipc.py` with:
+  - [x] `serialize_message` → single `\n`-terminated UTF-8 line
+  - [x] `deserialize_message` validates schema + version
+  - [x] `MAX_MESSAGE_BYTES` size cap
+  - [x] Error hierarchy: `IPCError`, `OversizeError`,
+        `MultilineError`, `SchemaVersionError`,
+        `MalformedMessageError`
+- [x] Rejects invalid role / type / version / extra fields
+- [x] Rejects verdict ties
+- [x] Rejects oversize / embedded-newline lines
+
+**Evidence — Stage 2**
+
+- Files: `src/debate/sdk/schemas.py`,
+  `src/debate/orchestration/ipc.py`.
+- Tests: `tests/unit/test_schemas.py`,
+  `tests/unit/test_ipc.py` (all passing in the latest run).
+
+---
+
+## Stage 3 — Config + secrets + logging + redaction
+
+- [x] `src/debate/shared/config.py`
+  - [x] `DebateConfig` Pydantic model with bounded fields
+  - [x] `Motions` Pydantic model with bounded ID/topic lengths
+  - [x] `load_debate_config(path)` and `load_motions(path)` validators
+- [x] `src/debate/shared/secrets.py`
+  - [x] `Secrets` dataclass, frozen
+  - [x] `load_secrets()` reads only from `os.environ`
+  - [x] `maybe_load_dotenv()` opt-in dev convenience
+- [x] `src/debate/shared/logger.py`
+  - [x] `RunLogger` creates `runs/<run_id>/` lazily
+  - [x] `run.jsonl` is one JSON object per line, redacted on write
+  - [x] Stderr capture paths exposed: `pro_stderr.log`,
+        `con_stderr.log` (underscores, not dots — Windows `CON`
+        reserved-name fix)
+  - [x] Records always include `ts`, `role`, `turn_id`, `event_type`
+- [x] `src/debate/shared/redaction.py`
+  - [x] Substring (case-insensitive) match on `api_key`, `token`,
+        `secret`, `password`, `authorization`
+  - [x] Recurses through dict / list / tuple, deep-copies, never mutates
+  - [x] Replaces values with `<redacted>` (not keys)
+- [x] `.env` is ignored by Git (Stage 1)
+- [x] `.env-example` has no real secret values
+- [x] Normal debate text (no sensitive keys) is not over-redacted
+- [x] Loaders reject bad config values (out-of-range, missing,
+      malformed JSON)
+
+**Evidence — Stage 3**
+
+- Files: `src/debate/shared/config.py`,
+  `src/debate/shared/secrets.py`, `src/debate/shared/logger.py`,
+  `src/debate/shared/redaction.py`.
+- Tests: `tests/unit/test_config.py`, `tests/unit/test_secrets.py`,
+  `tests/unit/test_logger.py`, `tests/unit/test_redaction.py`
+  (all passing).
+
+---
+
+## Stage 4 — Fake LLM/Search clients + Gatekeeper + Ledger + ToolRouter
+
+- [x] `src/debate/sdk/llm_client.py`
+  - [x] `LLMClient` runtime-checkable `Protocol`
+  - [x] `LLMResponse` Pydantic model (`text`, `tokens_in`,
+        `tokens_out`, `usd`)
+  - [x] `FakeLLMClient` offline, deterministic, no API key
+  - [x] Client itself owns no budget logic
+- [x] `src/debate/sdk/search_client.py`
+  - [x] `SearchClient` runtime-checkable `Protocol`
+  - [x] `SearchResult` with `title`, `url`, `snippet`
+  - [x] URL must be absolute `http(s)://`
+  - [x] Length caps: `MAX_TITLE_CHARS`, `MAX_URL_CHARS`,
+        `MAX_SNIPPET_CHARS`, `MAX_RESULTS_PER_RESPONSE`
+  - [x] Sanitization strips control chars and trims whitespace
+  - [x] `FakeSearchClient` offline, deterministic, no API key
+  - [x] Client itself owns no budget logic
+- [x] `src/debate/shared/ledger.py`
+  - [x] Tracks `requests`, `tokens_in`, `tokens_out`, `usd_spent`
+  - [x] Sliding-window `requests_in_window` for rate limits
+  - [x] `record(...)` / `reserve_request(...)` / `add_usage(...)` API
+- [x] `src/debate/shared/gatekeeper.py`
+  - [x] `GatekeeperPolicy` Pydantic model with bounded limits
+  - [x] `BudgetKind` enum + `BudgetExceededError` typed exception
+  - [x] `Gatekeeper.call_llm(...)` checks per-turn tokens,
+        per-debate tokens, USD per debate, requests-per-minute
+  - [x] `Gatekeeper.call_search(...)` checks the same budgets
+  - [x] On budget refusal the underlying callable is **not invoked**
+  - [x] On success the ledger is updated atomically
+- [x] `src/debate/shared/router.py`
+  - [x] `ToolRouter` wraps Gatekeeper + SearchClient + LRU cache
+  - [x] `ToolRouter.search(query)` normalizes (lowercase + whitespace
+        collapse) before keying the cache
+  - [x] Cache hit returns a copy without calling SearchClient or the
+        Gatekeeper
+  - [x] Cache eviction is LRU with configurable `cache_size`
+  - [x] Results are capped to `MAX_RESULTS_PER_RESPONSE`
+  - [x] `BudgetExceededError` is propagated unchanged
+  - [x] `clear_cache()` resets state
+- [x] No real HTTP / API call is required by any Stage 4 test
+- [~] Unknown tools are rejected — **PARTIAL**: implicit only.
+      `ToolRouter` exposes only `.search()`; there is no
+      `call(tool, ...)` dispatcher that raises on unknown tool
+      names. The explicit rejection will land with the debate loop's
+      `tool_call` handler. See open finding #3.
+
+**Evidence — Stage 4**
+
+- Files: `src/debate/sdk/llm_client.py`,
+  `src/debate/sdk/search_client.py`,
+  `src/debate/shared/ledger.py`,
+  `src/debate/shared/gatekeeper.py`,
+  `src/debate/shared/router.py`.
+- Tests: `tests/unit/test_llm_client.py`,
+  `tests/unit/test_search_client.py`,
+  `tests/unit/test_gatekeeper.py` (covers Ledger + Gatekeeper +
+  budget refusal not invoking the callable),
+  `tests/unit/test_router_cache.py` (covers cache hit bypassing
+  Gatekeeper, LRU eviction, BudgetExceededError propagation).
+
+---
+
+## Stage 5 — Pure deterministic debate state machine
+
+- [x] `src/debate/orchestration/state_machine.py`
+- [x] States: `INIT`, `SPAWNING`, `OPENING`, `PRO_TURN`, `SCORE_PRO`,
+      `CON_TURN`, `SCORE_CON`, `NEXT_ROUND`, `CLOSING`, `VERDICT`,
+      `VALIDATE_VERDICT`, `TIE_BREAK`, `RECOVER`, `ABORT`, `DONE`
+- [x] Events: `start`, `children_ready`, `sent_openings`, `pro_reply`,
+      `con_reply`, `scored`, `round_limit_reached`,
+      `closings_received`, `judge_reply`, `invalid_or_tie`,
+      `valid_non_tie`, `heartbeat_miss`, `respawned`,
+      `restarts_exhausted`, `budget_exhausted`, `spawn_failed`
+- [x] `transition(event, data=None) -> State` with typed
+      `IllegalTransitionError`
+- [x] `is_terminal()` for `DONE` / `ABORT`
+- [x] FSM is **pure**: imports only stdlib (`dataclasses`, `enum`,
+      `typing`, `__future__`); a static test in
+      `test_state_machine.py::TestPurity` blocks `subprocess`,
+      `httpx`, `requests`, `openai`, `anthropic`, `urllib`, `socket`,
+      `asyncio`, agent / supervisor / watchdog / LLM / search / IPC /
+      gatekeeper / router imports, and forbidden side-effect call
+      sites (`open(`, `Path(`, `subprocess.`, `os.system`, `os.popen`,
+      `tempfile.`)
+- [x] Tracks `current_round`, `verdict_retry_count`,
+      `last_missed_role`, `remembered_turn_state`, `max_rounds`
+- [x] Happy path for 1 round
+- [x] Happy path for 10 rounds
+- [x] Illegal transitions rejected
+- [x] `budget_exhausted` aborts from every non-terminal state
+- [x] `spawn_failed` aborts from `SPAWNING`
+- [x] `invalid_or_tie` retries once then escalates to `TIE_BREAK`
+- [x] `TIE_BREAK` advances to `DONE`
+- [x] `heartbeat_miss` from `PRO_TURN` / `CON_TURN` → `RECOVER`
+      with `last_missed_role` and `remembered_turn_state` set
+- [x] `respawned` returns to the remembered turn (counter preserved)
+- [x] `restarts_exhausted` aborts from `RECOVER`
+- [x] `is_terminal()` works for both `DONE` and `ABORT`
+
+**Evidence — Stage 5**
+
+- Files: `src/debate/orchestration/state_machine.py`.
+- Tests: `tests/unit/test_state_machine.py` — 58 tests across
+  construction, happy paths (1 + 10 rounds), illegal transitions,
+  budget exhaustion (parametrized over 13 non-terminal states),
+  spawn failure, verdict retry / tie-break, heartbeat recovery,
+  `is_terminal`, and static purity checks.
+
+---
+
+## Stage 6 — Supervisor / child process manager
+
+- [x] `src/debate/orchestration/supervisor.py`
+- [x] `ChildProcess` dataclass with `role`, `process`, `stdin`,
+      `stdout`, `stderr_path`, `start_time`, `restart_count`,
+      plus internal `read_queue`, `reader_thread`, `stderr_fh`
+- [x] `Supervisor.spawn(role)` accepts only `pro` / `con`
+- [x] `Supervisor.send(role, message)` uses
+      `debate.orchestration.ipc.serialize_message`; no manual JSON
+- [x] `Supervisor.receive(role, timeout)` uses
+      `debate.orchestration.ipc.deserialize_message`; timeout raises
+      `ChildReceiveTimeoutError`; EOF raises `ChildStreamClosedError`
+- [x] stdin / stdout pipes (`subprocess.PIPE`); per-child reader
+      thread drains stdout into a `queue.Queue`
+- [x] Stderr captured to per-role file:
+      `pro_stderr.log` / `con_stderr.log` (underscores — Windows
+      `CON` reserved-name fix)
+- [x] `terminate(role)` closes stdin, tries `proc.terminate()`,
+      hard-kills on `TimeoutExpired`, joins reader thread
+- [x] `terminate_all()` and context-manager `__exit__`
+- [x] `respawn(role)` increments `restart_count`, replaces the
+      `Popen` and the `pid`
+- [x] `build_child_env(role)` is an allow-list + deny-list of env
+      vars; `SEARCH_API_KEY` is dropped explicitly and is not in the
+      allow-list (defense in depth)
+- [x] Supervisor does **not** import Pro/Con agent modules, the
+      Judge module, or the Watchdog module
+      (`test_supervisor.py::TestIPCBoundary::test_supervisor_module_does_not_import_agent_modules`
+      and the import-grep in this audit confirm this)
+- [x] Watchdog is not implemented (still a 4-line Stage 1
+      placeholder at `src/debate/watchdog/watchdog.py`)
+- [x] Judge flow is not implemented (still a 4-line Stage 1
+      placeholder at `src/debate/judge/judge.py`)
+
+**Evidence — Stage 6**
+
+- Files: `src/debate/orchestration/supervisor.py`.
+- Tests:
+  - `tests/unit/test_supervisor.py` — 57 unit tests using
+    `FakePopen` with real `os.pipe()` (role validation, spawn,
+    send/receive, terminate-graceful + force-kill, terminate_all,
+    respawn, env filtering, IPC boundary).
+  - `tests/integration/test_supervisor_smoke.py` — 8 smoke tests
+    that actually spawn `python tests/integration/echo_child.py`
+    via the Supervisor and round-trip a real `Message`.
+- Stage boundary verified: `src/debate/orchestration/` contains
+  only `ipc.py` (Stage 2), `state_machine.py` (Stage 5), and
+  `supervisor.py` (Stage 6) — no loop / scheduler / watchdog file.
+
+---
+
+## Stage 7 — BaseAgent + DebaterAgent + ProAgent + ConAgent
+
+- [x] `src/debate/agents/base_agent.py`
+  - [x] `BaseAgent` reads bytes from injectable stdin,
+        writes bytes to injectable stdout
+  - [x] Uses `debate.orchestration.ipc.serialize_message` and
+        `deserialize_message`; never imports `json`
+  - [x] Handles `ping` → `pong` (with `in_reply_to` for correlation)
+  - [x] Handles `shutdown` by flipping `_running = False`
+  - [x] Dispatches `init`, `prompt`, `tool_result` to `handle(msg)`
+  - [x] Loop is defensive: `IPCError` → `_on_ipc_error`, handler
+        exception → `_on_handler_error`; the loop continues
+  - [x] EOF / closed pipe / `shutdown` → `run() → 0`
+- [x] `src/debate/agents/debater_agent.py`
+  - [x] `DebaterAgent(BaseAgent)`
+  - [x] `STANCE: ClassVar[str]`; invalid / unset stance raises
+        `TypeError` at construction
+  - [x] State: `motion`, `max_tokens`, `opponent_last`,
+        `selected_context`, `previous_tool_results`
+  - [x] `_on_init` updates motion / context / max_tokens, rejects
+        stance mismatch
+  - [x] `_on_prompt` reads phase + `opponent_last`, generates and
+        sends reply
+  - [x] `_on_tool_result` appends to `previous_tool_results`
+  - [x] `build_prompt(phase)` includes motion, stance, phase,
+        opponent_last (only for argument / closing), selected
+        context, recorded tool results, stance instruction
+  - [x] `generate_reply(phase)` calls the injected `LLMClient`
+        (`FakeLLMClient` in tests); never touches a real provider
+  - [x] Reply payload is schema-valid and includes
+        `phase`, `stance`, `content`, `tokens_in`, `tokens_out`
+  - [x] `request_search(query)` emits a valid `tool_call` envelope
+        with `payload={"tool": "search", "query": query}` and
+        rejects empty / whitespace queries
+  - [x] Does **not** import `SearchClient`, `FakeSearchClient`,
+        `ToolRouter`, `Gatekeeper`, `Ledger`, `subprocess`,
+        `requests`, `httpx`, `openai`, or `anthropic` anywhere in
+        the agents package
+- [x] `src/debate/agents/pro_agent.py` — `class ProAgent(DebaterAgent):
+      STANCE = "pro"` (no extra methods or attributes)
+- [x] `src/debate/agents/con_agent.py` — `class ConAgent(DebaterAgent):
+      STANCE = "con"` (no extra methods or attributes)
+- [x] `vars(ProAgent)` / `vars(ConAgent)` contains only `STANCE`
+      among non-dunder names (enforced by test)
+
+**Evidence — Stage 7**
+
+- Files: `src/debate/agents/base_agent.py`,
+  `src/debate/agents/debater_agent.py`,
+  `src/debate/agents/pro_agent.py`,
+  `src/debate/agents/con_agent.py`, `src/debate/agents/__init__.py`.
+- Tests:
+  - `tests/unit/test_base_agent.py` — 22 tests (construction,
+    heartbeat ping→pong, shutdown, dispatch over routed types,
+    malformed input swallowed by loop, outgoing JSONL wire format,
+    multi-ping correctness).
+  - `tests/unit/test_debater_agent.py` — 62 tests across subclass
+    shape, prompt building, reply generation per phase, stance
+    discipline, search `tool_call` emission, init / prompt /
+    tool_result dispatch via the run loop, and static
+    import-boundary assertions (`SearchClient`, `ToolRouter`,
+    `Gatekeeper`, `subprocess`, `requests`, `httpx`, `openai` are
+    forbidden in the agents package).
+
+---
+
+## Stage 8 — Watchdog / liveness monitor
+
+- [x] `src/debate/orchestration/watchdog.py`
+  - [x] `Watchdog` class with the contract specified in PRD:
+        `__init__(supervisor, heartbeat_interval_sec,
+        heartbeat_timeout_sec, on_miss, ...)`, `start()`, `stop()`,
+        `check_once()`, `is_running` property
+  - [x] Active `ping` / `pong` liveness probe per role (`pro` /
+        `con`), going through the Stage 6 Supervisor's JSONL pipes
+        - never serializes JSON itself
+  - [x] Outgoing pings are real `Message` envelopes
+        (`role=Role.JUDGE`, `type=MessageType.PING`, monotonic
+        `turn_id`, payload `{"watchdog_ping_id": <turn_id>}`)
+  - [x] Heartbeat-miss detection on: missing child, dead child,
+        send failure, receive timeout, stream EOF, IPC error, any
+        non-`PONG` reply (typed `MissReason` strings for logs)
+  - [x] `on_miss(role)` callback is the **only** outward signal;
+        Watchdog does not call `supervisor.respawn` and does not
+        touch the FSM directly (Stage 9/10 will translate
+        `on_miss` into `heartbeat_miss` / `respawned` /
+        `restarts_exhausted` FSM events)
+  - [x] Background daemon thread driven by `threading.Event` for
+        clean cancellation; `start()` is idempotent;
+        `stop(timeout=...)` joins; context-manager support
+  - [x] Logger duck-typed (`RunLogger`-compatible
+        `log(role, turn_id, event_type, **fields)`); ping / pong /
+        miss events emitted on the `"watchdog"` channel; logger
+        failures swallowed defensively
+- [x] No imports from `debate.agents.*`, `debate.judge.*`, or
+      `debate.orchestration.state_machine` (enforced by static
+      `inspect.getsource(...)` checks in
+      `tests/unit/test_watchdog.py::TestStageBoundary`)
+- [x] Unit tests with fake supervisor / fake clock:
+      `tests/unit/test_watchdog.py` — 42 tests covering happy
+      pings for pro and con, every miss path
+      (`no_child` / `child_not_alive` / `send_failed` / `timeout` /
+      `stream_closed` / `ipc_error` / `not_a_pong` /
+      `supervisor_error` / `unexpected_error`), determinism (role
+      order, repeated calls), ping envelope shape and injected
+      clock, threaded `start` / `stop` / idempotence /
+      loop-survives-exception / context manager, logger event
+      emission and logger-blowup containment, and the stage-boundary
+      static checks
+- [x] Lightweight chaos integration test
+      (`tests/integration/test_recovery_chaos.py`) — spawns a
+      tiny `heartbeat_child.py` (no `debate.*` imports, so no
+      PYTHONPATH plumbing needed) via the real `Supervisor`,
+      confirms a healthy ping/pong cycle records no miss, then
+      `Supervisor.terminate("pro")` and confirms both
+      `check_once()` and the background loop report the miss
+- [x] The Stage 1 placeholder at `src/debate/watchdog/watchdog.py`
+      is intentionally left in place (still 3 lines: docstring +
+      `from __future__`). It is still unused by any import path;
+      cleanup is queued for Stage 10 (see open finding #4)
+
+**Evidence — Stage 8**
+
+- Files: `src/debate/orchestration/watchdog.py`,
+  `tests/unit/test_watchdog.py`,
+  `tests/integration/test_recovery_chaos.py`,
+  `tests/integration/heartbeat_child.py`.
+- Public exports updated in
+  `src/debate/orchestration/__init__.py` (`Watchdog`,
+  `MissReason`, `OnMissCallback`,
+  `DEFAULT_HEARTBEAT_INTERVAL_SEC`,
+  `DEFAULT_HEARTBEAT_TIMEOUT_SEC`, `DEFAULT_ROLES`).
+- Tests passing: 44 new Stage 8 tests (42 unit + 2 integration)
+  on top of the 402 from Stages 1–7 = **446 passed in 3.07s**.
+
+
+
+## Stage 9 — Judge debate flow + verdict pipeline (NOT STARTED)
+
+- [ ] `JudgeAgent` with verdict prompt
+- [ ] JSON-only verdict output; ties rejected on the wire
+- [ ] Validate-verdict loop wired to the FSM
+  (`VERDICT` → `VALIDATE_VERDICT` → retry / `TIE_BREAK`)
+- [ ] Deterministic tie-break in `TIE_BREAK`
+- [ ] Final `verdict` envelope is the last record in `run.jsonl`
+- [ ] Existing `src/debate/judge/judge.py` is still a Stage 1
+      placeholder
+
+## Stage 10 — End-to-end debate loop, transcript, CLI, polish (NOT STARTED)
+
+- [ ] Debate loop driver wiring FSM ↔ Supervisor ↔ ToolRouter ↔
+      RunLogger
+- [ ] `tool_call` dispatcher with explicit `UnknownToolError`
+      (closes open finding #3)
+- [ ] Transcript writer feeds `RunLogger` from the loop
+- [ ] CLI flags: `--motion`, `--rounds`, `--model`, `--seed`
+- [ ] End-to-end run with `FakeLLMClient` + `FakeSearchClient`
+- [ ] Final docs pass (PRD / PLAN / TODO / README)
+- [ ] Backlog cleanup: remove dead Stage 1 layout sketch folders
+      (`src/debate/{config,gatekeeper,ipc,judge,prompts,utils,watchdog}/`
+      after their real homes are confirmed)
+- [ ] Backlog cleanup: add `runs/.gitkeep` + `runs/*` /
+      `!runs/.gitkeep` to `.gitignore` (closes open findings #1)
+- [ ] Backlog cleanup: emit `config/prompts/verdict.schema.json`
+      mirror of the `Verdict` Pydantic model (closes open finding #2)

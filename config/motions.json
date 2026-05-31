@@ -1,0 +1,16 @@
+{
+  "motions": [
+    {
+      "id": "ai-content-labels",
+      "topic": "AI-generated content should require mandatory labeling."
+    },
+    {
+      "id": "remote-work-default",
+      "topic": "Remote work should be the default for knowledge workers."
+    },
+    {
+      "id": "social-media-age",
+      "topic": "Social media use should be restricted to age 16 and above."
+    }
+  ]
+}

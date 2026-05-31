@@ -1,0 +1,9 @@
+{
+  "rounds": 10,
+  "token_limit_per_turn": 400,
+  "budget_total_tokens": 50000,
+  "heartbeat_seconds": 5.0,
+  "max_message_bytes": 65536,
+  "per_turn_timeout_seconds": 30.0,
+  "total_timeout_seconds": 300.0
+}

@@ -1,0 +1,66 @@
+# --- Python -----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# --- uv / virtualenvs -------------------------------------------------------
+.venv/
+venv/
+env/
+ENV/
+.uv/
+uv.lock
+
+# --- Testing / coverage -----------------------------------------------------
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+.hypothesis/
+
+# --- Ruff / mypy ------------------------------------------------------------
+.ruff_cache/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# --- Editors / IDEs ---------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# --- OS ---------------------------------------------------------------------
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Project specific -------------------------------------------------------
+.env
+.env.local
+*.log
+logs/
+transcripts/
+out/
+tmp/
