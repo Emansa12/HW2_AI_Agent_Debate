@@ -64,3 +64,10 @@ logs/
 transcripts/
 out/
 tmp/
+
+# --- Debate run artifacts ---------------------------------------------------
+# Generated run transcripts and per-role stderr logs live under runs/<id>/.
+# We keep the runs/ directory itself tracked via runs/.gitkeep so a fresh
+# clone can write into it without an explicit `mkdir runs`.
+runs/*
+!runs/.gitkeep

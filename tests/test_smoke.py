@@ -1,14 +1,19 @@
-"""Smoke tests for the Stage 1 skeleton.
+"""Smoke tests for the package's public surface.
 
-These tests do not exercise any debate logic - they only verify that
-the package layout is importable and the placeholder entry point
-returns 0.
+Verifies the package is importable, exposes a version, and the CLI
+``--version`` / ``--help`` paths work without spawning subprocesses.
+The full-debate end-to-end run is exercised in
+``tests/integration/test_e2e_debate.py``.
 """
 
 from __future__ import annotations
 
+import io
+
+import pytest
+
 import debate
-from debate.main import main
+from debate.main import build_parser, main
 
 
 def test_package_has_version() -> None:
@@ -16,9 +21,22 @@ def test_package_has_version() -> None:
     assert debate.__version__ != ""
 
 
-def test_main_returns_zero(capsys) -> None:
-    rc = main([])
-    captured = capsys.readouterr()
-    assert rc == 0
-    assert "HW2 - AI Agent Debate" in captured.out
-    assert "Stage 1 OK" in captured.out
+def test_cli_version_flag_exits_zero() -> None:
+    with pytest.raises(SystemExit) as ei:
+        build_parser().parse_args(["--version"])
+    assert ei.value.code == 0
+
+
+def test_cli_help_does_not_crash() -> None:
+    with pytest.raises(SystemExit) as ei:
+        build_parser().parse_args(["--help"])
+    assert ei.value.code == 0
+
+
+def test_cli_replay_missing_file_returns_one(tmp_path) -> None:
+    """A fast end-to-end smoke check that ``main`` dispatches to
+    replay, which never spawns a subprocess."""
+    out = io.StringIO()
+    rc = main(["--replay", str(tmp_path / "does_not_exist.jsonl")], out=out)
+    assert rc == 1
+    assert "not found" in out.getvalue()

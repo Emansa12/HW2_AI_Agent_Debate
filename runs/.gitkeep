@@ -1,0 +1,3 @@
+# Keep the runs/ directory in version control even when empty.
+# Real run artifacts (runs/<timestamp>/run.jsonl, *_stderr.log, etc.)
+# are excluded by .gitignore via `runs/*` + `!runs/.gitkeep`.

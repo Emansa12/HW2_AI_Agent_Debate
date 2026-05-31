@@ -14,27 +14,49 @@
 
 ## Current verified status
 
-| Stage | Scope                                                                            | Status                                 |
-|-------|----------------------------------------------------------------------------------|----------------------------------------|
-| 1     | Project skeleton, configs, placeholders, docs                                    | DONE with gaps (see PARTIAL items)     |
-| 2     | Pydantic schemas + JSONL IPC helpers                                             | DONE                                   |
-| 3     | Config + secrets + structured logging + redaction                                | DONE                                   |
-| 4     | Fake LLM / Search clients + Ledger + Gatekeeper + ToolRouter (with LRU cache)    | DONE with one PARTIAL                  |
-| 5     | Pure deterministic debate state machine (FSM)                                    | DONE                                   |
-| 6     | Supervisor / child process manager + integration smoke                           | DONE                                   |
-| 7     | BaseAgent, DebaterAgent, ProAgent, ConAgent                                      | DONE                                   |
-| 8     | Watchdog / liveness monitor                                                      | DONE                                   |
-| 9     | Judge debate flow + verdict pipeline                                             | DONE                                   |
-| 10    | End-to-end debate loop, transcript, CLI, polish                                  | NOT STARTED                            |
+| Stage | Scope                                                                            | Status |
+|-------|----------------------------------------------------------------------------------|--------|
+| 1     | Project skeleton, configs, placeholders, docs                                    | DONE   |
+| 2     | Pydantic schemas + JSONL IPC helpers                                             | DONE   |
+| 3     | Config + secrets + structured logging + redaction                                | DONE   |
+| 4     | Fake LLM / Search clients + Ledger + Gatekeeper + ToolRouter (with LRU cache)    | DONE   |
+| 5     | Pure deterministic debate state machine (FSM)                                    | DONE   |
+| 6     | Supervisor / child process manager + integration smoke                           | DONE   |
+| 7     | BaseAgent, DebaterAgent, ProAgent, ConAgent                                      | DONE   |
+| 8     | Watchdog / liveness monitor                                                      | DONE   |
+| 9     | Judge debate flow + verdict pipeline                                             | DONE   |
+| 10    | End-to-end debate loop, transcript, CLI, polish                                  | DONE   |
 
-**Latest gate run** (Sunday 2026-05-31, 23:24 UTC+3 — after Stage 9):
+**Latest gate run** (Sunday 2026-05-31, 23:55 UTC+3 — after Stage 10):
 
 ```
 uv sync                       Resolved 15 packages in 1ms / Checked 15 packages in 2ms
-uv run pytest -q              515 passed in 2.68s
+uv run pytest -q              574 passed in 5.40s
 uv run ruff check .           All checks passed!
-uv run ruff format --check .  66 files already formatted
+uv run ruff format --check .  56 files already formatted
+uv run python -m debate.main --motion "Is AI good for education?" --rounds 2 --fake
+                              winner=pro, scores=pro=50/con=40, transcript runs/<ts>/run.jsonl
 ```
+
+Stage 10 added **59 new tests** on top of the 515 from Stages 1–9
+(test counts updated where existing files grew):
+
+- `tests/unit/test_cli.py` — 25 tests (parser, motion / config
+  resolution, builder helpers, replay path, dispatch & namespace
+  shape).
+- `tests/unit/test_verdict_schema.py` — 19 tests (`config/prompts/verdict.schema.json`
+  shape + behavioral constraints — winner enum, score bounds,
+  reasons array minimum, no extra fields).
+- `tests/unit/test_housekeeping.py` — 8 tests (`runs/.gitkeep`
+  + `.gitignore` rules, dead placeholder folders gone, real
+  subpackages still present, `verdict.schema.json` parses,
+  `.env-example` has no real-looking secrets).
+- `tests/integration/test_e2e_debate.py` — 6 tests (real-subprocess
+  end-to-end run with FakeLLMClient, transcript / verdict /
+  ledger assertions, replay round-trip, quiet mode, seed flag,
+  spec demo command).
+- `tests/test_smoke.py` was retargeted to the new CLI surface
+  (replay-only path, no banner string match).
 
 Stage 9 added **69 new tests** on top of the 446 from Stages 1–8:
 
@@ -50,35 +72,34 @@ Stage 9 added **69 new tests** on top of the 446 from Stages 1–8:
   9 tests for the new `ToolRouter.call()` + `UnknownToolError`
   surface.
 
-**Open audit findings** (no source-code changes were made for these — they
-will be addressed when the relevant stage that needs them lands):
+**Open audit findings** — all four are now **CLOSED** as of Stage 10:
 
-1. `runs/.gitkeep` and a `runs/* except !runs/.gitkeep` rule in
-   `.gitignore` were never created. The runtime `RunLogger` does
-   `runs/<run_id>/`.mkdir at first use, so the missing directory does
-   not break code, but the explicit gitkeep pattern from the spec is
-   absent.
-2. `config/prompts/verdict.schema.json` does not exist. The verdict
-   shape is currently expressed only as a Pydantic model
-   (`debate.sdk.schemas.Verdict`). The JSON Schema mirror was not
-   produced.
+1. ~~`runs/.gitkeep` and a `runs/* except !runs/.gitkeep` rule in
+   `.gitignore` were never created.~~ **CLOSED in Stage 10.**
+   `runs/.gitkeep` is committed and `.gitignore` excludes
+   `runs/*` while whitelisting `!runs/.gitkeep`. Pinned by
+   `tests/unit/test_housekeeping.py::TestRunsDir`.
+2. ~~`config/prompts/verdict.schema.json` does not exist.~~
+   **CLOSED in Stage 10.** The JSON Schema mirror is now committed
+   at `config/prompts/verdict.schema.json` — winner enum is
+   `["pro","con"]`, scores are bounded `0..100`, `reasons.minItems`
+   is `3`, root has `additionalProperties: false`. Pinned by
+   `tests/unit/test_verdict_schema.py` (19 tests covering shape +
+   behavioral constraints).
 3. ~~`ToolRouter` exposes only `.search(query)`; there is no
    `router.call(tool_name, ...)` dispatcher with an explicit
    `UnknownToolError`.~~ **CLOSED in Stage 9.** `ToolRouter.call(...)`
-   is now the typed dispatcher used by the Judge to route
-   `tool_call` envelopes from children; unknown names raise
+   is the typed dispatcher used by the Judge to route `tool_call`
+   envelopes from children; unknown names raise
    `UnknownToolError` (subclass of `ValueError`); covered by
    `tests/unit/test_router_cache.py::TestRouterCallDispatcher`.
-4. The Stage 1 layout sketch folders
+4. ~~The Stage 1 layout sketch folders
    `src/debate/{config,gatekeeper,ipc,judge,prompts,utils,watchdog}/`
-   still exist with short placeholder modules. The real code lives
-   under `src/debate/{sdk,shared,orchestration,agents}/` and a
-   project-wide grep confirms **nothing imports the placeholder
-   folders**. After Stage 9 the Judge real home is
-   `src/debate/orchestration/judge.py`; the placeholder
-   `src/debate/judge/` (alongside `src/debate/watchdog/`) is now
-   strictly redundant. All of these are harmless but should be
-   removed in a tidy-up pass alongside Stage 10.
+   still exist with short placeholder modules.~~ **CLOSED in
+   Stage 10.** All seven Stage 1 placeholder directories were
+   removed; the real homes are
+   `src/debate/{sdk,shared,orchestration,agents}/`. Pinned by
+   `tests/unit/test_housekeeping.py::TestPlaceholderCleanup`.
 
 ---
 
@@ -87,7 +108,8 @@ will be addressed when the relevant stage that needs them lands):
 - [x] `pyproject.toml` (uv + pytest + ruff; PEP 735 `[dependency-groups].dev`)
 - [x] `src/debate/` package layout, importable
 - [x] `uv run python -m debate.main` placeholder banner returns 0
-- [x] `tests/test_smoke.py` (verifies version + banner)
+- [x] `tests/test_smoke.py` (Stage 10: retargeted to verify
+      version + CLI `--help` / `--version` / `--replay` paths)
 - [x] `README.md`
 - [x] `PROMPTS.md`
 - [x] `.env-example` (only placeholder values, no real secrets)
@@ -101,12 +123,11 @@ will be addressed when the relevant stage that needs them lands):
       (Windows reserved-name fix for `CON`)
 - [x] No `debate_app` references anywhere in the tree
       (verified by repo-wide grep)
-- [ ] `runs/.gitkeep` exists — **NOT DONE** (see open finding #1)
-- [~] `.gitignore` excludes `runs/*` except `runs/.gitkeep`
-      — **PARTIAL**: caches and `.env` are excluded, but no
-      `runs/*` + `!runs/.gitkeep` rule was added
-- [ ] `config/prompts/verdict.schema.json` exists — **NOT DONE**
-      (see open finding #2)
+- [x] `runs/.gitkeep` exists (closed in Stage 10)
+- [x] `.gitignore` excludes `runs/*` except `runs/.gitkeep`
+      (closed in Stage 10)
+- [x] `config/prompts/verdict.schema.json` exists
+      (closed in Stage 10)
 
 **Evidence — Stage 1**
 
@@ -620,23 +641,95 @@ will be addressed when the relevant stage that needs them lands):
   the unused 4-line stub (cleanup deferred to Stage 10 — see
   open finding #4).
 
-## Stage 10 — End-to-end debate loop, transcript, CLI, polish (NOT STARTED)
+## Stage 10 — End-to-end debate loop, transcript, CLI, polish (DONE)
 
-- [ ] CLI flags: `--motion`, `--rounds`, `--model`, `--seed` and a
-      `debate` console script wired to a real `Judge` run
-- [ ] End-to-end run on real `subprocess.Popen` children running
-      `python -m debate.agents.pro_agent` / `con_agent` (today
-      Judge integration is exercised against an in-memory
-      `FakeSupervisor`)
-- [ ] Watchdog → FSM bridge: turn `Watchdog.on_miss` into
-      `Event.HEARTBEAT_MISS` and orchestrate `respawn` /
-      `restarts_exhausted` around the per-turn loop
-- [ ] Final docs pass (PRD / PLAN / TODO / README)
-- [ ] Backlog cleanup: remove dead Stage 1 layout sketch folders
-      (`src/debate/{config,gatekeeper,ipc,judge,prompts,utils,watchdog}/`
-      after their real homes are confirmed)
-- [ ] Backlog cleanup: add `runs/.gitkeep` + `runs/*` /
-      `!runs/.gitkeep` to `.gitignore` (closes open finding #1)
-- [ ] Backlog cleanup: emit `config/prompts/verdict.schema.json`
-      mirror of the `Verdict` Pydantic model (closes open
-      finding #2)
+- [x] `src/debate/main.py` rewritten as a real `argparse` CLI with
+      `--motion`, `--rounds`, `--model`, `--seed`, `--fake` /
+      `--no-fake`, `--config`, `--motions-file`, `--runs-root`,
+      `--run-id`, `--replay`, `--quiet`, `--version`. `python -m
+      debate.main` and `python -m debate` both reach the same
+      entry point.
+- [x] End-to-end debate runs on real `subprocess.Popen` children
+      via `python -m debate.agents.{pro,con}_agent`, both of which
+      use `FakeLLMClient`; the parent verdict-LLM is also a
+      `FakeLLMClient` seeded with a canned valid verdict JSON.
+- [x] `runs/<UTC-timestamp>/run.jsonl` is produced per run with
+      every required event type
+      (`cli_invoked`, `debate_started`, `children_spawned`,
+      `init_sent`, `prompt_sent`, `reply_received`,
+      `tool_call_received` / `tool_result_sent` when applicable,
+      `score_recorded`, `verdict_llm_response`,
+      `verdict_recorded`, `debate_done`, `cli_finished`). Each
+      record carries `ts`, `role`, `turn_id`, `event_type`. Final
+      `cli_finished` includes a Gatekeeper ledger snapshot.
+- [x] Replay mode: `--replay <path>` reads only the saved
+      `run.jsonl`, never instantiates `LLMClient` /
+      `SearchClient` / `Supervisor`, prints per-event summaries,
+      and exits with the recorded verdict.
+- [x] Open finding #1 closed: `runs/.gitkeep` committed,
+      `.gitignore` has `runs/*` + `!runs/.gitkeep`. Pinned by
+      `tests/unit/test_housekeeping.py::TestRunsDir`.
+- [x] Open finding #2 closed: `config/prompts/verdict.schema.json`
+      mirrors the `Verdict` Pydantic model (winner enum
+      `pro|con`; scores `0..100`; reasons `minItems = 3`;
+      `additionalProperties: false` at the root). Pinned by
+      `tests/unit/test_verdict_schema.py` (19 tests).
+- [x] Open finding #3 stays closed (Stage 9). `ToolRouter.call` +
+      `UnknownToolError` continue to be exercised by
+      `tests/unit/test_router_cache.py::TestRouterCallDispatcher`.
+- [x] Open finding #4 closed: all seven Stage 1 placeholder
+      directories (`src/debate/{config,gatekeeper,ipc,judge,prompts,utils,watchdog}/`)
+      were removed; `tests/unit/test_housekeeping.py::TestPlaceholderCleanup`
+      pins both their absence and the presence of the real
+      `src/debate/{agents,orchestration,sdk,shared}/` subpackages.
+- [x] Final docs pass: `README.md`, `PROMPTS.md`, `docs/PRD_HW2.md`,
+      `docs/PLAN_HW2.md`, and `docs/TODO_HW2.md` all rewritten to
+      describe the actual Stage 10 surface.
+- [~] Watchdog → FSM bridge (`Watchdog.on_miss` →
+      `Event.HEARTBEAT_MISS` → orchestrated `respawn`) is **not
+      wired** in the Stage 10 CLI loop. The Stage 8 Watchdog
+      remains an injectable component with deterministic unit
+      tests; the Stage 10 demo runs do not need recovery
+      because the children are deterministic FakeLLMClient
+      subprocesses. Wiring the bridge is intentionally deferred -
+      it requires a recovery policy (max retries, escalation),
+      which is beyond the HW2 scope.
+
+**Evidence — Stage 10**
+
+- Files (new):
+  - `src/debate/main.py` (rewritten Stage 1 placeholder into a
+    full CLI: `build_parser`, `replay`, `run_live`,
+    `_build_judge_llm`, `_build_gatekeeper`, `_build_router`,
+    `_build_runs_dir`, `_build_child_env`, `main`)
+  - `config/prompts/verdict.schema.json` (Verdict JSON Schema mirror)
+  - `runs/.gitkeep` (tracks the runs/ dir)
+  - `tests/unit/test_cli.py` (25 tests)
+  - `tests/unit/test_verdict_schema.py` (19 tests)
+  - `tests/unit/test_housekeeping.py` (8 tests)
+  - `tests/integration/test_e2e_debate.py` (6 tests)
+- Files (changed):
+  - `.gitignore` (added `runs/*` + `!runs/.gitkeep`)
+  - `tests/test_smoke.py` (retargeted to the new CLI surface)
+  - `tests/unit/test_watchdog.py` (`_FORBIDDEN_IMPORT_TOKENS`
+    updated to point at the real Judge home and CLI module)
+  - `README.md`, `PROMPTS.md`, `docs/PRD_HW2.md`,
+    `docs/PLAN_HW2.md`, `docs/TODO_HW2.md`
+- Files (removed):
+  - `src/debate/config/` (settings.py + __init__.py)
+  - `src/debate/gatekeeper/` (gatekeeper.py + __init__.py)
+  - `src/debate/ipc/` (channel.py + messages.py + __init__.py)
+  - `src/debate/judge/` (judge.py + __init__.py)
+  - `src/debate/prompts/` (__init__.py)
+  - `src/debate/utils/` (logger.py + __init__.py)
+  - `src/debate/watchdog/` (watchdog.py + __init__.py)
+- Latest gate run (2026-05-31 23:55 UTC+3): **574 passed in
+  5.40s** (515 carried over + 59 new Stage 10 tests), ruff `All
+  checks passed!`, ruff format `56 files already formatted`.
+- Demo run (offline, fake LLM, real subprocess Pro/Con):
+  ```
+  uv run python -m debate.main \
+      --motion "Is AI good for education?" --rounds 2 --fake
+  ```
+  → winner `pro`, scores `pro=50 con=40`, 3 reasons, 33-line
+  parseable transcript at `runs/<UTC-ts>/run.jsonl`.

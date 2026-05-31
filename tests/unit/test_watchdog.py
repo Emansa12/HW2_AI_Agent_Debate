@@ -706,11 +706,13 @@ class TestLogging:
 _FORBIDDEN_IMPORT_TOKENS = (
     "from debate.agents",
     "import debate.agents",
-    "from debate.judge",
-    "import debate.judge",
+    "from debate.orchestration.judge",
+    "import debate.orchestration.judge",
     "JudgeAgent",
     "ProAgent",
     "ConAgent",
+    "from debate.main",
+    "import debate.main",
 )
 
 

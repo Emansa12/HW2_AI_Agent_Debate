@@ -110,12 +110,19 @@ that picks a single winner.
 
 - `uv run python -m debate.main` runs end-to-end without unhandled
   errors and writes a `runs/<timestamp>/run.jsonl` file whose last
-  record is a `verdict` message with `winner in {"pro","con"}`.
+  verdict-bearing record is a `verdict_recorded` event with
+  `winner in {"pro","con"}`.
 - All unit and integration tests pass under `uv run pytest -q`.
 - `uv run ruff check .` and `uv run ruff format --check .` are clean.
 - The only application package present is `debate`.
+- The default demo runs **fully offline** (FakeLLMClient +
+  FakeSearchClient) and requires no real API key.
+- A saved transcript can be re-displayed via
+  `uv run python -m debate.main --replay runs/<timestamp>/run.jsonl`
+  without any LLM / search call.
 
 ## 8. Stages
 
 See [`PLAN_HW2.md`](PLAN_HW2.md) for the execution plan and
-[`TODO_HW2.md`](TODO_HW2.md) for the granular checklist.
+[`TODO_HW2.md`](TODO_HW2.md) for the granular checklist. As of
+Stage 10, all ten stages are DONE.

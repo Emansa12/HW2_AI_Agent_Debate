@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hw2-ai-debate/schemas/verdict.schema.json",
+  "title": "Debate verdict",
+  "description": "Mirror of debate.sdk.schemas.Verdict + the Stage 9 Judge.validate_verdict contract. The Judge MUST return JSON shaped exactly like this; ties are forbidden, scores are bounded 0..100, and at least 3 reasons are required.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["winner", "scores", "reasons"],
+  "properties": {
+    "winner": {
+      "description": "Side that won the debate. Tie is forbidden by protocol; the Judge must always pick a side. If the LLM produces a tie, the Stage 9 verdict pipeline retries once and then falls back to a deterministic tie-break.",
+      "type": "string",
+      "enum": ["pro", "con"]
+    },
+    "scores": {
+      "description": "Cumulative scores per side, derived from per-turn Judge scoring. Bounded 0..100 to keep transcripts well-formed.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pro", "con"],
+      "properties": {
+        "pro": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "con": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        }
+      }
+    },
+    "reasons": {
+      "description": "Free-form rationale strings supporting the winner. The Judge requires at least 3 (MIN_VERDICT_REASONS); each must be a non-empty trimmed string.",
+      "type": "array",
+      "minItems": 3,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "rationale": {
+      "description": "Optional one-sentence summary. Pydantic's Verdict.rationale.",
+      "type": ["string", "null"]
+    }
+  }
+}

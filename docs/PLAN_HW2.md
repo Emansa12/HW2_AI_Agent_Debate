@@ -1,25 +1,31 @@
 # PLAN - HW2: AI Agent Debate
 
 > Execution plan: architecture + per-stage progress + design notes.
+> Living document. Updated as stages land.
 
 ## 1. Architecture
 
-The Judge / Parent Process is the central controller. Pro and Con
-are sandboxed child processes; they never talk to each other - all
-messaging passes through the Supervisor on the Judge side via JSONL
-IPC.
+The Judge / Parent process is the central controller. Pro and Con
+are sandboxed child subprocesses; they never talk to each other -
+all messaging passes through the Supervisor on the Judge side via
+JSONL IPC.
 
 ```
 +------------------------------------------------------------+
-|                Judge / Parent Process                       |
+|                Judge / Parent process                       |
 |                (central controller)                         |
 |                                                             |
 |  +-----------+  +-----------+  +-----------+  +----------+ |
 |  | Gatekeep. |  | ToolRouter|  | Watchdog  |  |  Logger  | |
 |  | LLM/search|  | search +  |  |  child    |  | runs/    | |
-|  |  policy   |  |  cache    |  |  recovery |  | <ts>/    | |
+|  |  policy   |  |  cache    |  |  liveness |  | <ts>/    | |
 |  +-----------+  +-----------+  +-----------+  | run.jsonl| |
 |                                               +----------+ |
+|       +------------------+    +-----------------+          |
+|       |  StateMachine    |    |  Judge          |          |
+|       | (pure FSM, all   |    | (controls the   |          |
+|       |  legal events)   |    |  debate loop)   |          |
+|       +------------------+    +-----------------+          |
 |                +--------------------+                       |
 |                |    Supervisor      |                       |
 |                | (JSONL IPC owner)  |                       |
@@ -39,143 +45,209 @@ IPC.
 
 ### 1.1 Component responsibilities
 
-- **Judge / Parent Process** - owns the debate loop, the turn
-  counter, the phase machine (opening / argument / closing), and
-  the final verdict. Single source of truth.
-- **Supervisor** - spawns Pro and Con child processes, owns the two
-  JSONL pipes, marshals every message between them, and shuts the
-  children down cleanly.
-- **Gatekeeper** - gate for all LLM and search calls made on behalf
-  of either side; enforces turn order, response format, length,
-  and basic content rules (no insults, on-topic). Rejected outputs
-  produce an `event` and either a re-ask or a strike.
-- **ToolRouter** - the only path to external tools. Handles search
-  with an in-memory + on-disk cache so repeat queries are cheap.
-- **Watchdog** - per-turn timeout, total wall-clock budget, child
-  liveness probes via `ping`/`pong`. On hang it kills and may
-  restart the child; on repeated failure it escalates and aborts.
-- **Logger** - writes the run transcript and runtime events to
-  `runs/<timestamp>/run.jsonl`. Exactly one JSONL file per run.
+- **CLI** (`debate.main`) - argparse entry point. Loads
+  `DebateConfig` and `Motion`, builds every component below, drives
+  one debate end-to-end, writes a `runs/<id>/run.jsonl` transcript,
+  and supports `--replay` of a saved transcript.
+- **Judge / parent process** (`debate.orchestration.judge`) - owns
+  the debate loop, validates every child message, alternates Pro
+  and Con turns, scores each turn, generates the final verdict
+  (with retry + deterministic tie-break), and is the *only*
+  component that imports both Supervisor and ToolRouter.
+- **DebateStateMachine** (`debate.orchestration.state_machine`) -
+  pure FSM. The Judge fires events (`START`,
+  `CHILDREN_READY`, `SENT_OPENINGS`, ...) and the FSM enforces
+  the legal sequence; no I/O lives here.
+- **Supervisor** (`debate.orchestration.supervisor`) - spawns Pro
+  and Con as `python -m debate.agents.pro_agent` /
+  `con_agent` subprocesses, owns the JSONL pipes, marshals every
+  message between them, captures per-role stderr to disk, and
+  shuts the children down cleanly. Filters child env to a strict
+  allow-list (always strips `SEARCH_API_KEY`).
+- **Gatekeeper** (`debate.shared.gatekeeper`) - gate for all LLM
+  and search calls. Enforces tokens/turn, tokens/debate,
+  USD/debate, and RPM. Updates a `Ledger`. Wraps every
+  `LLMClient.complete` and `SearchClient.search` call.
+- **ToolRouter** (`debate.shared.router`) - the only path to
+  external tools. `call(tool_name, **kw)` dispatches to a
+  `SearchClient` (with LRU cache) and raises
+  `UnknownToolError` for any tool other than `search`.
+- **Watchdog** (`debate.orchestration.watchdog`) - per-turn
+  liveness probe. Sends `ping`, expects `pong`, calls
+  `on_miss(role)` when a child is unresponsive. Does **not** own
+  the recovery policy - that belongs to the Judge / FSM.
+- **RunLogger** (`debate.shared.logger`) - writes the run
+  transcript and runtime events to `runs/<timestamp>/run.jsonl`.
+  One JSONL file per run. Redacts known secret patterns before
+  writing.
+- **Pro / Con agents** (`debate.agents.{pro,con}_agent` +
+  `debate.agents.debater_agent` + `debate.agents.base_agent`) -
+  child subprocesses. Receive `prompt` / `tool_result` / `ping`,
+  reply with `argument` / `tool_call` / `pong`. Stance-only
+  subclass on top of `DebaterAgent`. Use a pluggable
+  `LLMClient` (default `FakeLLMClient`) and never see search
+  credentials.
 
 ### 1.2 Run output
 
-Every run writes a single JSONL transcript:
+Every live run writes:
 
 ```
-runs/<UTC-timestamp>/run.jsonl
+runs/<UTC-timestamp>/
+├── run.jsonl            # JSONL transcript (one JSON object per line)
+├── pro_stderr.log       # Pro subprocess stderr capture
+└── con_stderr.log       # Con subprocess stderr capture
 ```
 
-The last record in that file is always a `verdict` message with
-`winner in {"pro","con"}`. Ties are forbidden by schema.
+The transcript includes (at minimum) `cli_invoked`,
+`debate_started`, `children_spawned`, `init_sent`, `prompt_sent`,
+`reply_received`, `score_recorded`, `verdict_recorded`,
+`debate_done`, `cli_finished`. Each record carries `ts`, `role`,
+`turn_id`, `event_type`, plus event-specific fields. The last
+verdict-bearing record is `verdict_recorded`; ties are forbidden
+by schema (the Judge always picks `pro` or `con`).
+
+`runs/` itself is tracked via `runs/.gitkeep`; the contents are
+gitignored (`runs/*` + `!runs/.gitkeep`).
 
 ## 2. Stage progress
 
-| Stage | Scope                                                                  | Status      |
-|-------|------------------------------------------------------------------------|-------------|
-| 1     | Project skeleton, configs, placeholders, docs.                         | DONE        |
-| 2     | Pydantic schemas, JSONL IPC helpers, unit tests.                       | DONE        |
-| 3     | Pro / Con child processes talking via JSONL IPC, no moderation yet.    | NOT STARTED |
-| 4     | Gatekeeper (turn order, format, content rules, LLM/search gating).     | NOT STARTED |
-| 5     | ToolRouter (search + cache) and Supervisor (process orchestration).    | NOT STARTED |
-| 6     | Watchdog (per-turn + total timeouts, child recovery, graceful abort).  | NOT STARTED |
-| 7     | Judge (final verdict + written justification, no-tie enforcement).     | NOT STARTED |
-| 8     | End-to-end run, transcript persistence, evaluation, polish.            | NOT STARTED |
+| Stage | Scope                                                                  | Status |
+|-------|------------------------------------------------------------------------|--------|
+| 1     | Project skeleton, configs, placeholders, docs.                         | DONE   |
+| 2     | Pydantic schemas, JSONL IPC helpers, unit tests.                       | DONE   |
+| 3     | DebateConfig, Motion loader, secret redaction, dotenv hygiene.         | DONE   |
+| 4     | LLMClient + SearchClient interfaces, fakes, ToolRouter cache.          | DONE   |
+| 5     | DebateStateMachine (pure FSM with legal events / transitions).         | DONE   |
+| 6     | Supervisor (subprocess spawn, JSONL pipes, stderr capture, env filter).| DONE   |
+| 7     | BaseAgent + DebaterAgent + Pro/Con stance subclasses.                  | DONE   |
+| 8     | Watchdog (ping/pong, on_miss callback, no recovery policy).            | DONE   |
+| 9     | Judge debate flow + verdict pipeline (retry + deterministic tie-break).| DONE   |
+| 10    | CLI, end-to-end run, transcript, replay, doc/cleanup polish.           | DONE   |
 
 ### Stage 1 - skeleton (DONE)
 
-- `pyproject.toml` with `uv` / `pytest` / `ruff` config.
-- `src/debate/` package layout with subpackages for `agents/`,
-  `gatekeeper/`, `watchdog/`, `judge/`, `ipc/` (legacy stub),
-  `config/`, `prompts/`, `utils/`.
-- Entry point `debate.main` reachable as
-  `uv run python -m debate.main`.
-- `tests/test_smoke.py` proves the package layout is importable.
+- `pyproject.toml` with uv / pytest / ruff config.
+- `src/debate/` package with `__main__.py` and a placeholder
+  `main.py`.
+- Smoke test that the package imports and the entry point exits 0.
 
 ### Stage 2 - schemas + IPC (DONE)
 
-- `src/debate/sdk/schemas.py`
-  - `Role` (judge / pro / con)
-  - `MessageType` (11 closed values)
-  - `Phase` (opening / argument / closing)
-  - `Verdict` (winner must be `pro` or `con`; tie forbidden)
-  - `Message` envelope: `v, ts, turn_id, role, type, payload`
-  - Pydantic v2, `StrEnum`, `extra="forbid"` on the envelope.
-- `src/debate/orchestration/ipc.py`
-  - `MAX_MESSAGE_BYTES = 64 * 1024`
-  - `serialize_message(msg)` returns exactly one newline-terminated line.
-  - `deserialize_message(line)` validates size, multiline, version,
-    JSON shape, and Pydantic schema.
-  - Error hierarchy under `IPCError`: `OversizeError`,
-    `MultilineError`, `SchemaVersionError`, `MalformedMessageError`.
-- `tests/unit/test_schemas.py` + `tests/unit/test_ipc.py` (42 tests).
+- `debate.sdk.schemas`: `Role`, `MessageType` (11 closed values),
+  `Phase`, `Verdict` (`winner` is `Literal["pro","con"]`),
+  `Message` envelope.
+- `debate.orchestration.ipc`: `serialize_message` /
+  `deserialize_message` with size, multiline, version, schema
+  validation; structured error hierarchy.
 
-### Stage 3 - Pro / Con child processes (TODO)
+### Stage 3 - config / motions / redaction (DONE)
 
-- `subprocess.Popen` based child launcher (one per side).
-- Child-side worker that reads JSONL from stdin and writes JSONL to
-  stdout using the Stage 2 helpers.
-- Turn scheduler in the Judge that alternates Pro / Con and tags
-  the current `phase`.
-- Default cadence: 10 turns per side (configurable later).
-- No Gatekeeper / Watchdog yet - just two children talking through
-  the parent.
+- `debate.shared.config.DebateConfig` + `Motion` loader.
+- `debate.shared.redaction` for known secret patterns.
+- `.env-example` / `.gitignore` hygiene + tests.
 
-### Stage 4 - Gatekeeper (TODO)
+### Stage 4 - LLM/Search/Router fakes (DONE)
 
-- Turn-order check (who should speak next).
-- Format / length check on every `reply`.
-- Content rules (no insults, on-topic, language policy).
-- Strike counter; reject as `event` and re-ask, or abort after N
-  strikes.
+- `LLMClient` / `FakeLLMClient`.
+- `SearchClient` / `FakeSearchClient`.
+- `ToolRouter` with LRU cache + Gatekeeper integration.
 
-### Stage 5 - ToolRouter + Supervisor (TODO)
+### Stage 5 - state machine (DONE)
 
-- ToolRouter: single entry point for `tool_call` / `tool_result`,
-  with an in-memory LRU cache backed by an on-disk store under
-  `runs/<timestamp>/cache/`.
-- Supervisor: process lifecycle (spawn, pipe, drain, terminate);
-  the only component that holds the child handles.
+- `DebateStateMachine` is a pure FSM. Drives every legal event
+  transition (start, openings, rounds, closings, verdict, plus
+  recovery edges). Owns no I/O.
 
-### Stage 6 - Watchdog (TODO)
+### Stage 6 - Supervisor (DONE)
 
-- Per-turn timeout (default 30 s) and total wall-clock budget
-  (default 300 s); both override-able.
-- Cooperative cancellation primitive (raises in the Judge loop on
-  timeout).
-- Hard-kill fallback for unresponsive children; restart-or-abort
-  policy.
+- Subprocess spawning with explicit env allow-list (drops
+  `SEARCH_API_KEY` always).
+- Per-role stderr captured to disk (`<role>_stderr.log`).
+- `spawn` / `send` / `receive` / `terminate` / `respawn` /
+  `terminate_all`.
+- Real subprocess integration tests with `echo_child.py`.
 
-### Stage 7 - Judge (TODO)
+### Stage 7 - debater agents (DONE)
 
-- Judge prompt with JSON-only output.
-- Tie outputs from the LLM are coerced to a side or rejected with a
-  re-ask. The on-the-wire `verdict` cannot be a tie.
-- Final `verdict` is the last record in `run.jsonl`.
+- `BaseAgent` reads JSONL from stdin, writes JSONL to stdout,
+  validates everything against the wire schema.
+- `DebaterAgent` adds prompt -> argument / tool_call behavior on
+  top of `BaseAgent`.
+- `ProAgent` / `ConAgent` are stance-only one-line subclasses.
 
-### Stage 8 - End-to-end (TODO)
+### Stage 8 - Watchdog (DONE)
 
-- Transcript writer (`runs/<timestamp>/run.jsonl`).
-- CLI flags: `--topic`, `--turns-per-side`, `--model`.
-- End-to-end smoke run with a mock LLM.
-- Final README / PRD / PLAN / TODO pass.
+- Liveness monitor. `start` / `stop` / `check_once`.
+- Sends `ping`, expects `pong`, fires `on_miss(role)` for missing
+  pongs, malformed pongs, dead children, send/recv errors.
+- Strict stage-boundary tests pin that Watchdog never imports
+  agent or Judge modules and never calls `Supervisor.respawn`.
 
-## 3. Design notes (open questions captured up front)
+### Stage 9 - Judge debate flow + verdict pipeline (DONE)
 
-- **Message schema**: settled - `role`, `turn_id`, `type`, `payload`,
-  envelope-versioned by `v`. Phase is carried inside payloads, not
-  the envelope.
-- **IPC transport**: stdin/stdout pipes between the parent and each
-  child. Trivially upgrades to OS sockets later without changing
-  the wire format.
-- **Gatekeeper policy**: hard reject + re-ask (no silent
-  rewrites). Re-asks are themselves on-the-wire `event` messages so
-  the transcript is honest.
-- **Watchdog cancellation**: cooperative first
-  (`asyncio.CancelledError` or a `threading.Event`), then kill with
-  a small grace window. Children must drain quickly on shutdown.
-- **Judge rubric**: clarity, evidence quality, rebuttal strength,
-  on-topic-ness. Encoded in the Judge prompt; verdict JSON has
-  `winner` + `rationale`.
-- **Determinism**: temperature + seed pinned per role; the full
-  prompt and parameters are logged into `run.jsonl` so a run can be
-  replayed.
+- `debate.orchestration.judge.Judge` is the central controller.
+  Drives the FSM, mediates Pro/Con through the Supervisor,
+  validates every reply (role / type / non-empty / stance),
+  routes `tool_call` through `ToolRouter.call`, scores each
+  turn, accumulates scores, and produces the final verdict.
+- Verdict pipeline: LLM -> JSON parse -> validate -> on failure,
+  retry once -> on second failure, deterministic tie-break
+  (higher cumulative score wins; exact tie -> Con).
+- `ToolRouter.call(tool_name, **kw)` + `UnknownToolError` close
+  the open audit finding for unknown-tool dispatching.
+
+### Stage 10 - CLI + end-to-end + polish (DONE)
+
+- `debate.main` is now a real CLI with `--motion`, `--rounds`,
+  `--model`, `--seed`, `--fake / --no-fake`, `--config`,
+  `--motions-file`, `--runs-root`, `--run-id`, `--replay`,
+  `--quiet`, `--version`.
+- End-to-end run: spawns real Pro/Con subprocesses (using
+  `FakeLLMClient`), drives the full FSM, produces a parseable
+  `runs/<id>/run.jsonl`, and writes per-role stderr.
+- Replay mode reads a saved transcript without ever
+  instantiating an LLM, search client, or subprocess.
+- `config/prompts/verdict.schema.json` ships as the
+  language-agnostic mirror of the `Verdict` Pydantic contract;
+  unit-tested end-to-end.
+- `runs/.gitkeep` tracks the directory; `.gitignore` excludes
+  generated artifacts.
+- All Stage 1 placeholder folders
+  (`src/debate/{config,gatekeeper,ipc,judge,prompts,utils,watchdog}`)
+  are removed.
+- README / PROMPTS / PRD / PLAN / TODO refreshed to match the
+  Stage 10 surface.
+
+## 3. Design notes
+
+- **Pure FSM**: the state machine has no I/O. The Judge calls
+  `transition(event)` and reacts to the resulting `State`.
+  Trying to use the FSM as a pseudo-controller would couple
+  recovery to the legal-event surface; we deliberately keep them
+  apart.
+- **Tie handling**: the schema cannot represent a tie. The
+  Judge's `_verdict_with_retry` therefore always returns either a
+  validated LLM verdict or a tie-broken fallback verdict. Both
+  paths produce the same `verdict_recorded` event with `source`
+  set to `"llm"` or `"tie_break"`.
+- **Subprocess vs in-process child**: the Supervisor spawns real
+  subprocesses; the unit-test layer uses an in-memory
+  `FakeSupervisor`. The CLI demo uses the real Supervisor with
+  `FakeLLMClient` inside the children, so the integration test
+  exercises real OS pipes plus the full Stage 9 pipeline.
+- **Where `Judge` lives**: `debate.orchestration.judge`, alongside
+  `state_machine`, `supervisor`, `watchdog`, and `ipc`. The
+  Stage 1 placeholder `src/debate/judge/` was a layout sketch
+  only and was removed in Stage 10.
+- **Determinism**: `FakeLLMClient` is constructor-deterministic
+  (returns its `response_text`), the Stage 4 search cache is
+  insertion-ordered, and the FSM is purely event-driven, so the
+  same `--seed` + `--motion` + `--rounds` produces a transcript
+  that differs only in `ts` fields.
+- **Replay scope**: replay is intentionally narrow. It reads the
+  transcript line-by-line, prints a per-event summary, surfaces
+  the recorded verdict, and exits. It does not re-validate
+  scores, re-run prompts, or call any client. Anything richer
+  would require keeping prompts/replies in the transcript with
+  no redaction loss, which we explicitly avoid.
