@@ -10,6 +10,47 @@ are sandboxed child subprocesses; they never talk to each other -
 all messaging passes through the Supervisor on the Judge side via
 JSONL IPC.
 
+The only Python application package is **`src/debate/`**. No
+alternative application package names are used anywhere in the
+tree. The user-facing run command is
+always:
+
+```
+uv run python -m debate.main
+```
+
+### 1.0 Current package layout
+
+```
+src/debate/
+├── __init__.py
+├── __main__.py               # forwards to debate.main:main
+├── main.py                   # CLI entry point (Stage 10 + 11)
+├── agents/                   # child-side debater code
+│   ├── base_agent.py         #   stdin/stdout JSONL agent base
+│   ├── debater_agent.py      #   prompt -> argument / tool_call
+│   ├── pro_agent.py          #   stance="pro"
+│   └── con_agent.py          #   stance="con"
+├── orchestration/            # parent-side controllers
+│   ├── ipc.py                #   serialize/deserialize_message
+│   ├── state_machine.py      #   pure deterministic FSM
+│   ├── supervisor.py         #   subprocess + JSONL pipes
+│   ├── watchdog.py           #   ping/pong liveness probe
+│   └── judge.py              #   debate loop + verdict pipeline
+├── sdk/                      # public schemas + provider clients
+│   ├── schemas.py            #   Message/Role/MessageType/Phase/Verdict
+│   ├── llm_client.py         #   LLMClient + FakeLLMClient
+│   ├── search_client.py      #   SearchClient + FakeSearchClient
+│   ├── real_llm_client.py    #   Stage 11: RealLLMClient (opt-in)
+│   └── real_search_client.py #   Stage 11: RealSearchClient (opt-in)
+└── shared/                   # cross-cutting infra
+    ├── config.py             #   DebateConfig + Motion loader
+    ├── gatekeeper.py         #   tokens/usd/rpm policy + Ledger
+    ├── logger.py             #   RunLogger -> runs/<id>/run.jsonl
+    ├── redaction.py          #   secret-pattern redactor
+    └── router.py             #   ToolRouter (LRU cache + Gatekeeper)
+```
+
 ```
 +------------------------------------------------------------+
 |                Judge / Parent process                       |
@@ -63,7 +104,10 @@ JSONL IPC.
   `con_agent` subprocesses, owns the JSONL pipes, marshals every
   message between them, captures per-role stderr to disk, and
   shuts the children down cleanly. Filters child env to a strict
-  allow-list (always strips `SEARCH_API_KEY`).
+  allow-list. Deny-list always strips every search-key shape
+  (`SEARCH_API_KEY`, `TAVILY_API_KEY`, `BRAVE_SEARCH_API_KEY`,
+  `SERPAPI_API_KEY`) so Pro / Con can never reach a search
+  provider directly even in Stage 11 real-mode.
 - **Gatekeeper** (`debate.shared.gatekeeper`) - gate for all LLM
   and search calls. Enforces tokens/turn, tokens/debate,
   USD/debate, and RPM. Updates a `Ledger`. Wraps every
@@ -124,6 +168,7 @@ gitignored (`runs/*` + `!runs/.gitkeep`).
 | 8     | Watchdog (ping/pong, on_miss callback, no recovery policy).            | DONE   |
 | 9     | Judge debate flow + verdict pipeline (retry + deterministic tie-break).| DONE   |
 | 10    | CLI, end-to-end run, transcript, replay, doc/cleanup polish.           | DONE   |
+| 11    | Optional real-provider clients (Tavily search + OpenAI-compatible LLM).| DONE   |
 
 ### Stage 1 - skeleton (DONE)
 
@@ -161,8 +206,10 @@ gitignored (`runs/*` + `!runs/.gitkeep`).
 
 ### Stage 6 - Supervisor (DONE)
 
-- Subprocess spawning with explicit env allow-list (drops
-  `SEARCH_API_KEY` always).
+- Subprocess spawning with explicit env allow-list. Deny-list
+  always strips search-key shapes (`SEARCH_API_KEY` from Stage 6;
+  `TAVILY_API_KEY` / `BRAVE_SEARCH_API_KEY` / `SERPAPI_API_KEY`
+  added in Stage 11) regardless of allow-list growth.
 - Per-role stderr captured to disk (`<role>_stderr.log`).
 - `spawn` / `send` / `receive` / `terminate` / `respawn` /
   `terminate_all`.
@@ -199,25 +246,112 @@ gitignored (`runs/*` + `!runs/.gitkeep`).
 
 ### Stage 10 - CLI + end-to-end + polish (DONE)
 
-- `debate.main` is now a real CLI with `--motion`, `--rounds`,
-  `--model`, `--seed`, `--fake / --no-fake`, `--config`,
+- `debate.main` is a real CLI with `--motion`, `--rounds`,
+  `--model`, `--seed`, `--fake` / `--no-fake`,
+  `--real-search`, `--real-llm` *(both added in Stage 11 but
+  surfaced as part of the same CLI namespace)*, `--config`,
   `--motions-file`, `--runs-root`, `--run-id`, `--replay`,
-  `--quiet`, `--version`.
+  `--quiet`, `--version`. The user-facing run command is
+  always `uv run python -m debate.main`.
 - End-to-end run: spawns real Pro/Con subprocesses (using
-  `FakeLLMClient`), drives the full FSM, produces a parseable
-  `runs/<id>/run.jsonl`, and writes per-role stderr.
+  `FakeLLMClient` by default), drives the full FSM, produces a
+  parseable `runs/<id>/run.jsonl`, and writes per-role stderr.
 - Replay mode reads a saved transcript without ever
   instantiating an LLM, search client, or subprocess.
 - `config/prompts/verdict.schema.json` ships as the
   language-agnostic mirror of the `Verdict` Pydantic contract;
   unit-tested end-to-end.
 - `runs/.gitkeep` tracks the directory; `.gitignore` excludes
-  generated artifacts.
-- All Stage 1 placeholder folders
+  generated artifacts (`runs/*` + `!runs/.gitkeep`).
+- All Stage 1 placeholder layout-sketch folders
   (`src/debate/{config,gatekeeper,ipc,judge,prompts,utils,watchdog}`)
-  are removed.
-- README / PROMPTS / PRD / PLAN / TODO refreshed to match the
-  Stage 10 surface.
+  were removed in Stage 10. Those names are **not** used and
+  never were used by any production code; they were only ever
+  empty directories. The current layout is the single source of
+  truth - see [§ 1.0](#10-current-package-layout).
+- README / PROMPTS / PRD / PLAN / TODO refreshed to match.
+
+### Stage 11 - Optional Real API Support (DONE, opt-in)
+
+Stage 11 adds two **opt-in** real-provider clients without
+changing the default fake-mode behaviour. The grading path is
+unchanged: `--fake` is still the default, the entire test suite
+is offline, and no real API key is required for `pytest`,
+`ruff`, or the demo command.
+
+- `debate.sdk.real_search_client.RealSearchClient` - HTTP-backed
+  `SearchClient` for **Tavily** (`https://api.tavily.com/search`).
+  Reads `SEARCH_API_KEY` (canonical) or `TAVILY_API_KEY` (alias)
+  from the env. Sends `Authorization: Bearer …`; never embeds
+  the key in URLs, request bodies, or logs. Maps upstream errors
+  to typed exceptions (`MissingSearchAPIKeyError`,
+  `SearchProviderError`, `SearchProviderUnavailableError`,
+  `SearchProviderResponseError`). Routes the response through
+  the same `SearchResult` / `SearchResponse` Pydantic models so
+  sanitisation and size caps match the fake client.
+- `debate.sdk.real_llm_client.RealLLMClient` - HTTP-backed
+  `LLMClient` for **OpenAI-compatible** Chat Completions
+  endpoints (OpenAI itself, Together, Groq, OpenRouter, Azure
+  OpenAI, local vLLM / LM Studio bridges). Reads `LLM_API_KEY`
+  (canonical) or `OPENAI_API_KEY` (alias). Computes USD cost
+  from the upstream `usage` block via configurable per-1K-token
+  prices. Same typed-error hierarchy
+  (`MissingLLMAPIKeyError`, `LLMProviderError`,
+  `LLMProviderUnavailableError`, `LLMProviderResponseError`).
+- New runtime dependency: `httpx >= 0.27.0` (used only by the
+  two real clients; tests use `httpx.MockTransport` for
+  offline coverage).
+- New CLI flags (default off): `--real-search`, `--real-llm`,
+  and `--no-fake` (shorthand for both). `--fake` (default) is
+  unchanged. Flags can be combined - "fake LLM + real search"
+  is a legitimate hybrid mode.
+- `Supervisor` allow-list adds `LLM_API_KEY` and
+  `DEBATE_REAL_LLM`; deny-list extends to `TAVILY_API_KEY`,
+  `BRAVE_SEARCH_API_KEY`, `SERPAPI_API_KEY` so Pro / Con can
+  never see a search key.
+- `pro_agent.py` / `con_agent.py` `__main__` blocks switch to
+  `RealLLMClient.from_env()` only when `DEBATE_REAL_LLM=1` is
+  present in their env (set by the parent CLI on `--real-llm`).
+  Default stays `FakeLLMClient`, so every existing test path is
+  untouched.
+- Every real call still flows through
+  Judge → ToolRouter → Gatekeeper for tools, and
+  Judge → Gatekeeper → LLMClient for completions. The Stage 4
+  redaction, ledger, and rate limiting paths are identical for
+  fake and real clients.
+
+**Run command examples** (cross-checked with README §
+"Optional: real-provider modes"):
+
+```
+# Default - offline fake mode (used for grading, demos, tests)
+uv run python -m debate.main --motion "..." --rounds 2 --fake
+
+# Hybrid - real Tavily search, fake LLM
+uv run python -m debate.main --motion "..." --rounds 2 --fake --real-search
+
+# Full real-provider mode (requires both API keys)
+uv run python -m debate.main --motion "..." --rounds 2 --no-fake
+# equivalent, more explicit:
+uv run python -m debate.main --motion "..." --rounds 2 --real-llm --real-search
+```
+
+### Design note - why two extra clients (Stage 11)
+
+The HW2 grading run uses fake clients only - the assignment asks
+for a working multi-agent debate, not a demo of a paid provider.
+Stage 11 was added because the protocol is already provider-neutral
+(`LLMClient` and `SearchClient` are bare Protocols), and gluing in
+real HTTP backends costs ~300 LOC each and demonstrates that the
+abstraction is real. Crucially:
+
+- The default mode and the test suite still need **zero** keys.
+- All gatekeeping, redaction, and JSON-Schema validation paths
+  fire identically for fake and real clients.
+- The ``httpx.MockTransport`` test fixtures cover request shape,
+  response parsing, error mapping, and missing-key behaviour so a
+  reviewer can read the unit tests instead of running a paid
+  provider.
 
 ## 3. Design notes
 
@@ -251,3 +385,29 @@ gitignored (`runs/*` + `!runs/.gitkeep`).
   scores, re-run prompts, or call any client. Anything richer
   would require keeping prompts/replies in the transcript with
   no redaction loss, which we explicitly avoid.
+
+## 4. Cross-document consistency
+
+This file is kept in lock-step with the other Stage 11 docs. If
+any of these statements is ever violated, please open an issue:
+
+- The only application package is `src/debate/` (matches
+  [`PRD_HW2.md`](PRD_HW2.md) § 2 "Tooling (mandatory)" and
+  [`README.md`](../README.md) "Project layout"). No alternative
+  application package names are used anywhere in the tree.
+- The user-facing run command is always
+  `uv run python -m debate.main` (matches PRD § 2 and the
+  README "Quick start").
+- Default mode is `--fake`; `--real-search`, `--real-llm`,
+  and `--no-fake` are documented as opt-in real-provider modes
+  in README, [`PROMPTS.md`](../PROMPTS.md) "Stage 11" section,
+  and the Stage 11 evidence block in
+  [`TODO_HW2.md`](TODO_HW2.md).
+- Tests stay offline by default; real-client tests use
+  `httpx.MockTransport`. This is asserted in TODO_HW2.md's
+  Stage 11 evidence block and in README "Security".
+- The on-disk module layout in § 1.0 above must match the actual
+  contents of `src/debate/`. The Stage 1 placeholder folders
+  `src/debate/{config,gatekeeper,ipc,judge,prompts,utils,watchdog}`
+  are layout sketches that were never used; they were deleted
+  in Stage 10 and are not part of the live architecture.

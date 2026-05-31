@@ -6,11 +6,14 @@ central controller; Pro and Con are sandboxed child processes that
 **never communicate directly** - every message between them is
 routed through the Judge over JSONL IPC on stdin/stdout.
 
-> **Status: Stage 10 done.** End-to-end debate runs from the
+> **Status: Stage 11 done.** End-to-end debate runs from the
 > terminal, writes a JSONL transcript under
 > `runs/<timestamp>/run.jsonl`, supports replay, and ships with a
-> JSON Schema for verdicts. Default mode is fully offline (fake
-> LLM / fake search), so no API keys are required.
+> JSON Schema for verdicts. Default mode is **fully offline** (fake
+> LLM / fake search), so no API keys are required - that is the
+> grading path. Stage 11 added **opt-in** real-provider clients
+> (Tavily search + OpenAI-compatible LLM) behind ``--real-search``
+> and ``--real-llm`` flags.
 
 ## Quick start
 
@@ -28,6 +31,24 @@ uv run pytest -q
 uv run ruff check .
 uv run ruff format --check .
 ```
+
+### Optional: real-provider modes (Stage 11)
+
+```bash
+# Hybrid: real Tavily search, fake LLM (cheapest sanity check)
+uv run python -m debate.main --motion "..." --rounds 2 --fake --real-search
+
+# Full real-provider mode: real OpenAI-compatible LLM + real search
+uv run python -m debate.main --motion "..." --rounds 2 --no-fake
+
+# Equivalent to --no-fake, but explicit:
+uv run python -m debate.main --motion "..." --rounds 2 --real-llm --real-search
+```
+
+Real modes read keys from the environment only (`LLM_API_KEY` /
+`OPENAI_API_KEY` for the LLM, `SEARCH_API_KEY` /
+`TAVILY_API_KEY` for search). See [Security](#security) below and
+the comments in `.env-example`.
 
 ## HW2 assignment context
 
@@ -198,9 +219,12 @@ uv run python -m debate.main --rounds 2 --quiet
 |------|---------|-------------|
 | `--motion <text>` | first entry of `config/motions.json` | Debate topic |
 | `--rounds <int>` | `DebateConfig.rounds` (10) | Argument rounds per side, capped at 100 |
-| `--model <id>` | `fake` | LLM model identifier (logged; only `fake` is wired today) |
+| `--model <id>` | `fake` | LLM model identifier. Used when `--real-llm` is set; passed through to RealLLMClient. |
 | `--seed <int>` | unset | Optional Python `random.seed` for reproducibility |
-| `--fake` / `--no-fake` | `--fake` | `--no-fake` reserved for real-provider mode (raises today) |
+| `--fake` | on | Use offline FakeLLMClient + FakeSearchClient. **Default.** |
+| `--no-fake` | off | Shorthand for `--real-llm --real-search`. Requires both API keys. |
+| `--real-search` | off | Stage 11: use Tavily-backed `RealSearchClient`. Requires `SEARCH_API_KEY` (or `TAVILY_API_KEY`). Combinable with `--fake`. |
+| `--real-llm` | off | Stage 11: use OpenAI-compatible `RealLLMClient` for Judge + Pro/Con. Requires `LLM_API_KEY` (or `OPENAI_API_KEY`). |
 | `--config <path>` | `config/debate.json` | Override DebateConfig location |
 | `--motions-file <path>` | `config/motions.json` | Override motions file |
 | `--runs-root <path>` | `runs/` | Where the per-run directory is created |
@@ -246,28 +270,47 @@ spawn real Pro/Con subprocesses but those subprocesses use
 
 ## Security
 
-- `.env` is in `.gitignore`.
-- `.env-example` ships with placeholder values only - tests pin
-  this with a regex sweep for `sk-…`, `AKIA…`, and Google API key
-  shapes (see `tests/unit/test_housekeeping.py`).
-- The `Supervisor` filters the child env to an explicit allow-list
-  and **always** strips `SEARCH_API_KEY` before spawning a child.
-- `RunLogger` redacts known secret patterns (`sk-…`, `AKIA…`,
+- `.env` is in `.gitignore`. `.env-example` ships with **empty**
+  placeholders only - tests pin this with a regex sweep for
+  `sk-…`, `AKIA…`, and Google API key shapes
+  (see `tests/unit/test_housekeeping.py`).
+- API keys are read from the **environment only**. They never
+  appear in source, config, prompts, transcripts, or logs.
+  `RunLogger` redacts known secret patterns (`sk-…`, `AKIA…`,
   Google keys, JWT-shaped tokens) before writing to disk.
-- The default demo never requires any real API key, so tests and
-  demos never need a key in CI.
+- Real-provider clients (Stage 11) only ever pass the key as the
+  `Authorization: Bearer …` request header to `httpx`. The key is
+  never embedded in URLs, request bodies, or error messages.
+- The `Supervisor` filters the child env to an explicit allow-list
+  AND applies a deny-list. Pro and Con processes never see any
+  search key (`SEARCH_API_KEY` / `TAVILY_API_KEY` /
+  `BRAVE_SEARCH_API_KEY` / `SERPAPI_API_KEY` are blocked) - search
+  is **always** brokered by the parent's Judge → ToolRouter →
+  Gatekeeper.
+- The default demo and the entire test suite never require any
+  real API key. Real-provider tests use `httpx.MockTransport` for
+  synthetic responses, so CI works offline.
 
 ## Current limitations
 
-- The shipped LLM client is `FakeLLMClient`. Real-provider mode
-  (`--no-fake`) raises `NotImplementedError` until a provider is
-  wired in. The full plumbing - prompts, schema-validated verdicts,
-  gatekeeping, retries, deterministic tie-break - is complete and
-  drives the fake LLM end to end.
-- `--seed` only seeds the `random` module. The fake LLM is already
-  deterministic (it returns its constructor's `response_text`),
-  so the seed is recorded for forward-compatibility with a real
-  provider.
+- Stage 11 shipped real clients for **search** (Tavily) and the
+  **LLM** (OpenAI-compatible Chat Completions). Both default to
+  off; the full pipeline still works on `FakeLLMClient` /
+  `FakeSearchClient` for the grading run.
+- The OpenAI-compatible RealLLMClient was tested against the
+  Chat Completions JSON schema only. Streaming responses, tool
+  calls, and JSON-mode are not used by the Judge prompt; if you
+  swap in a provider that requires those, you may need a small
+  client subclass.
+- `--seed` only seeds the `random` module. `FakeLLMClient` is
+  already deterministic, and `RealLLMClient`'s determinism
+  depends entirely on the upstream provider's `temperature`
+  (default 0.2). The seed is recorded in the transcript for
+  reproducibility book-keeping.
+- `--real-llm` swaps the LLM for both the Judge AND the Pro/Con
+  subprocesses (so the children also call the real provider).
+  This obviously costs money and goes through the Gatekeeper
+  budget; set the budgets in `config/debate.json` accordingly.
 
 ## Documentation
 

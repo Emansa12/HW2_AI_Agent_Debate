@@ -118,10 +118,17 @@ _DEFAULT_CHILD_ENV_ALLOWLIST: frozenset[str] = frozenset(
         "LC_CTYPE",
         "TZ",
         # API keys child agents legitimately need. Search is *not*
-        # here: search must be brokered by the parent process.
+        # here: search must be brokered by the parent process. The
+        # generic ``LLM_API_KEY`` is the Stage 11 canonical name;
+        # ``OPENAI_API_KEY`` is kept as a provider-specific alias.
+        "LLM_API_KEY",
         "OPENAI_API_KEY",
         "OPENAI_BASE_URL",
         "OPENAI_MODEL",
+        # Stage 11: tells the child's __main__ block to swap
+        # FakeLLMClient for RealLLMClient. Set to "1" by the parent
+        # CLI when ``--real-llm`` is passed.
+        "DEBATE_REAL_LLM",
         # Debate-config-relevant passthroughs.
         "DEBATE_ROUNDS",
         "DEBATE_MAX_TOKENS",
@@ -131,7 +138,14 @@ _DEFAULT_CHILD_ENV_ALLOWLIST: frozenset[str] = frozenset(
 
 _DENIED_CHILD_ENV_KEYS: frozenset[str] = frozenset(
     {
+        # Search is *only* brokered by the parent ToolRouter +
+        # Gatekeeper; child processes must never see a search key.
+        # Both the canonical name and the Stage 11 Tavily-specific
+        # alias are blocked, even if the allow-list grew carelessly.
         "SEARCH_API_KEY",
+        "TAVILY_API_KEY",
+        "BRAVE_SEARCH_API_KEY",
+        "SERPAPI_API_KEY",
     }
 )
 

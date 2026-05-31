@@ -216,3 +216,33 @@ This invariant is pinned by `tests/unit/test_judge_agent.py`
 The Watchdog is **not** an LLM agent; it is a timing / safety
 controller. It has no prompt. Documented here so the set of roles
 is explicit. See `src/debate/orchestration/watchdog.py`.
+
+---
+
+## Stage 11: real provider notes
+
+The prompts above are **provider-agnostic**: they're built by
+`Judge.build_prompt` and posted through any
+`debate.sdk.llm_client.LLMClient`. Two implementations ship:
+
+- `FakeLLMClient` (default) - returns a constant string. The CLI
+  pre-loads it with the canned verdict JSON so the demo always
+  produces a schema-valid `Verdict`.
+- `RealLLMClient` (Stage 11, opt-in via `--real-llm`) - posts the
+  prompt to an OpenAI-compatible Chat Completions endpoint. The
+  prompt is sent as a single `user` message; no `system` /
+  `tool` / `function` fields are used, which keeps the contract
+  identical to the fake client.
+
+The `tool_call` / `tool_result` mediation (Judge → ToolRouter →
+Gatekeeper) is **identical** in fake and real modes. Pro/Con
+debater subprocesses cannot reach a search provider directly:
+the Supervisor's deny-list strips `SEARCH_API_KEY`,
+`TAVILY_API_KEY`, `BRAVE_SEARCH_API_KEY`, and `SERPAPI_API_KEY`
+before spawning a child, so even a misbehaving child agent that
+imported `httpx` directly would not have the credential.
+
+The verdict JSON contract above is enforced regardless of mode:
+`Judge.validate_verdict` is the same function in both, and its
+JSON-Schema mirror at `config/prompts/verdict.schema.json` rejects
+any tie or out-of-range scores from any provider.

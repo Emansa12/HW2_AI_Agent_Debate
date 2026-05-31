@@ -43,12 +43,41 @@ class TestParser:
         assert args.model == "fake"
         assert args.seed is None
         assert args.fake is True
+        assert args.real_search is False
+        assert args.real_llm is False
         assert args.replay is None
         assert args.config is None
         assert args.motions_file is None
         assert args.runs_root == "runs"
         assert args.run_id is None
         assert args.quiet is False
+
+    def test_real_search_flag(self) -> None:
+        args = build_parser().parse_args(["--real-search"])
+        assert args.real_search is True
+        assert args.fake is True  # combinable with --fake
+
+    def test_real_llm_flag(self) -> None:
+        args = build_parser().parse_args(["--real-llm"])
+        assert args.real_llm is True
+
+    def test_no_fake_implies_real_modes(self) -> None:
+        """``--no-fake`` is shorthand; the actual mode resolution
+        happens in :func:`debate.main._resolve_modes`."""
+        from debate.main import _resolve_modes
+
+        args = build_parser().parse_args(["--no-fake"])
+        real_llm, real_search = _resolve_modes(args)
+        assert real_llm is True
+        assert real_search is True
+
+    def test_fake_with_real_search_only(self) -> None:
+        from debate.main import _resolve_modes
+
+        args = build_parser().parse_args(["--fake", "--real-search"])
+        real_llm, real_search = _resolve_modes(args)
+        assert real_llm is False
+        assert real_search is True
 
     def test_all_flags_parse(self) -> None:
         argv = [
@@ -179,26 +208,52 @@ class TestBuilders:
         assert gk.policy.max_tokens_per_debate >= 200
 
     def test_build_judge_llm_fake_mode_returns_canned_verdict(self) -> None:
-        llm = _build_judge_llm(model="fake", fake=True)
+        llm = _build_judge_llm(model="fake", real_llm=False)
         resp = llm.complete(prompt="anything", max_tokens=100)
         # Canned text is shaped as a verdict JSON.
         assert resp.text == DEFAULT_VERDICT_TEXT
         data = json.loads(resp.text)
         assert data["winner"] in ("pro", "con")
 
-    def test_build_judge_llm_no_fake_raises(self) -> None:
-        with pytest.raises(NotImplementedError):
-            _build_judge_llm(model="gpt-4", fake=False)
+    def test_build_judge_llm_real_mode_without_key_raises(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from debate.sdk.real_llm_client import MissingLLMAPIKeyError
+
+        monkeypatch.delenv("LLM_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        with pytest.raises(MissingLLMAPIKeyError):
+            _build_judge_llm(model="gpt-4o-mini", real_llm=True)
 
     def test_build_child_env_does_not_leak_search_api_key(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("SEARCH_API_KEY", "should-not-leak")
+        monkeypatch.setenv("TAVILY_API_KEY", "should-not-leak")
         env = _build_child_env()
-        # The CLI helper does NOT add SEARCH_API_KEY itself; the
-        # Supervisor's deny-list strips it again as defense-in-depth
+        # The CLI helper does NOT add the search keys itself; the
+        # Supervisor's deny-list strips them again as defense-in-depth
         # before the child process is spawned.
         assert "SEARCH_API_KEY" not in env
+        assert "TAVILY_API_KEY" not in env
+
+    def test_build_child_env_real_llm_forwards_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-fake-test")
+        monkeypatch.setenv("OPENAI_MODEL", "gpt-4o-mini")
+        env = _build_child_env(real_llm=True)
+        assert env.get("DEBATE_REAL_LLM") == "1"
+        assert env.get("OPENAI_API_KEY") == "sk-fake-test"
+        assert env.get("OPENAI_MODEL") == "gpt-4o-mini"
+
+    def test_build_child_env_fake_mode_does_not_set_real_llm_flag(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-fake-test")
+        env = _build_child_env(real_llm=False)
+        assert "DEBATE_REAL_LLM" not in env
+        # The key is *not* forwarded in fake mode (defense in depth -
+        # children have no use for it when they're using FakeLLMClient).
+        assert "OPENAI_API_KEY" not in env
 
     def test_build_child_env_adds_pythonpath_for_src_layout(self) -> None:
         env = _build_child_env()
@@ -333,12 +388,19 @@ class TestMainDispatch:
         assert rc == 1
         assert "rounds" in out.getvalue()
 
-    def test_main_no_fake_mode_raises_user_facing_error(
+    def test_main_no_fake_without_keys_fails_clearly(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """Stage 11: ``--no-fake`` is shorthand for
+        ``--real-llm --real-search``. Without API keys it must
+        fail cleanly with a typed error pointing the user at the
+        env var to set, not raise an unhandled exception.
+        """
         monkeypatch.chdir(tmp_path)
+        for key in ("LLM_API_KEY", "OPENAI_API_KEY", "SEARCH_API_KEY", "TAVILY_API_KEY"):
+            monkeypatch.delenv(key, raising=False)
         out = io.StringIO()
         rc = main(
             [
@@ -353,8 +415,64 @@ class TestMainDispatch:
             out=out,
         )
         assert rc == 1
-        text = out.getvalue()
-        assert "fake" in text.lower() or "real" in text.lower()
+        text = out.getvalue().lower()
+        # Either the search OR the LLM key check fires first; both
+        # error messages mention the missing env var name.
+        assert "missing" in text
+        assert "api key" in text
+
+    def test_main_real_search_without_key_fails_clearly(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        for key in ("SEARCH_API_KEY", "TAVILY_API_KEY"):
+            monkeypatch.delenv(key, raising=False)
+        out = io.StringIO()
+        rc = main(
+            [
+                "--motion",
+                "x",
+                "--rounds",
+                "1",
+                "--fake",
+                "--real-search",
+                "--runs-root",
+                str(tmp_path / "runs"),
+            ],
+            out=out,
+        )
+        assert rc == 1
+        text = out.getvalue().lower()
+        assert "missing" in text
+        assert "search" in text
+
+    def test_main_real_llm_without_key_fails_clearly(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        for key in ("LLM_API_KEY", "OPENAI_API_KEY"):
+            monkeypatch.delenv(key, raising=False)
+        out = io.StringIO()
+        rc = main(
+            [
+                "--motion",
+                "x",
+                "--rounds",
+                "1",
+                "--real-llm",
+                "--runs-root",
+                str(tmp_path / "runs"),
+            ],
+            out=out,
+        )
+        assert rc == 1
+        text = out.getvalue().lower()
+        assert "missing" in text
+        assert "llm" in text
 
 
 # ---------------------------------------------------------------------------
@@ -372,6 +490,8 @@ class TestNamespaceShape:
             "model",
             "seed",
             "fake",
+            "real_search",
+            "real_llm",
             "config",
             "motions_file",
             "runs_root",

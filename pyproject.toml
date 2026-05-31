@@ -10,6 +10,12 @@ authors = [
 dependencies = [
     "python-dotenv>=1.0.1",
     "pydantic>=2.6.0",
+    # httpx is used by the optional Stage 11 RealSearchClient /
+    # RealLLMClient. It is a small pure-Python (+ a Rust core via h11/h2)
+    # dependency and ships with first-class testing primitives
+    # (`httpx.MockTransport`) so the offline test suite never hits the
+    # network even when the real-client code paths are exercised.
+    "httpx>=0.27.0",
 ]
 
 [project.optional-dependencies]

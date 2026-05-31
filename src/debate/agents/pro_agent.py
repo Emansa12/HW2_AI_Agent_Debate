@@ -23,6 +23,19 @@ __all__ = ["ProAgent"]
 
 
 if __name__ == "__main__":
-    from debate.sdk.llm_client import FakeLLMClient
+    # Stage 11: child swaps in :class:`RealLLMClient` only when the
+    # parent CLI explicitly opted in via ``DEBATE_REAL_LLM=1`` (set
+    # by ``--real-llm``). Default stays the offline FakeLLMClient
+    # so the rest of the suite never needs an API key.
+    import os
 
-    raise SystemExit(ProAgent(llm_client=FakeLLMClient()).run())
+    if os.environ.get("DEBATE_REAL_LLM") == "1":
+        from debate.sdk.real_llm_client import RealLLMClient
+
+        client = RealLLMClient.from_env()
+    else:
+        from debate.sdk.llm_client import FakeLLMClient
+
+        client = FakeLLMClient()
+
+    raise SystemExit(ProAgent(llm_client=client).run())

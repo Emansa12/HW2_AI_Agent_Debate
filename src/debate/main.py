@@ -52,7 +52,7 @@ from debate.orchestration.state_machine import DebateStateMachine
 from debate.orchestration.supervisor import Supervisor
 from debate.sdk.llm_client import FakeLLMClient, LLMClient
 from debate.sdk.schemas import Verdict
-from debate.sdk.search_client import FakeSearchClient
+from debate.sdk.search_client import FakeSearchClient, SearchClient
 from debate.shared.config import DebateConfig, load_debate_config, load_motions
 from debate.shared.gatekeeper import Gatekeeper, GatekeeperPolicy
 from debate.shared.logger import RunLogger
@@ -114,8 +114,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--model",
         type=str,
         default="fake",
-        help="LLM model identifier. Currently only 'fake' is wired in; "
-        "real provider support lands in a future stage.",
+        help="LLM model identifier. Used when `--real-llm` is set (passed "
+        "through to RealLLMClient). 'fake' (default) selects FakeLLMClient.",
     )
     parser.add_argument(
         "--seed",
@@ -135,8 +135,29 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-fake",
         dest="fake",
         action="store_false",
-        help="Reserved: switch to real provider once one is wired in. "
-        "Today this raises NotImplementedError.",
+        help="Shorthand for `--real-llm --real-search`. Both real "
+        "clients require API keys in the environment "
+        "(LLM_API_KEY/OPENAI_API_KEY, SEARCH_API_KEY/TAVILY_API_KEY).",
+    )
+    parser.add_argument(
+        "--real-search",
+        dest="real_search",
+        action="store_true",
+        default=False,
+        help="Stage 11: use the real Tavily-backed SearchClient for "
+        "tool calls. Requires SEARCH_API_KEY (or TAVILY_API_KEY) in "
+        "the environment. The Gatekeeper + ToolRouter still wrap "
+        "every call.",
+    )
+    parser.add_argument(
+        "--real-llm",
+        dest="real_llm",
+        action="store_true",
+        default=False,
+        help="Stage 11: use the real OpenAI-compatible LLMClient for "
+        "the Judge's verdict generation AND for both Pro/Con "
+        "subprocesses. Requires LLM_API_KEY (or OPENAI_API_KEY) in "
+        "the environment.",
     )
     parser.add_argument(
         "--config",
@@ -189,7 +210,24 @@ def build_parser() -> argparse.ArgumentParser:
 # ---------------------------------------------------------------------------
 
 
-def _print_banner(out: Any, *, motion: str, rounds: int, run_dir: Path, fake: bool) -> None:
+def _print_banner(
+    out: Any,
+    *,
+    motion: str,
+    rounds: int,
+    run_dir: Path,
+    fake: bool,
+    real_llm: bool,
+    real_search: bool,
+) -> None:
+    if real_llm and real_search:
+        mode = "real LLM + real search"
+    elif real_llm:
+        mode = "real LLM + fake search"
+    elif real_search:
+        mode = "fake LLM + real search"
+    else:
+        mode = "fake / offline" if fake else "real provider"
     out.write(
         "\n".join(
             [
@@ -197,7 +235,7 @@ def _print_banner(out: Any, *, motion: str, rounds: int, run_dir: Path, fake: bo
                 f"  HW2 - AI Agent Debate (v{__version__})",
                 f"  motion : {motion}",
                 f"  rounds : {rounds} (per side)",
-                f"  mode   : {'fake / offline' if fake else 'real provider'}",
+                f"  mode   : {mode}",
                 f"  run dir: {run_dir}",
                 "======================================================================",
                 "",
@@ -341,17 +379,44 @@ def _build_gatekeeper(cfg: DebateConfig) -> Gatekeeper:
     return Gatekeeper(policy)
 
 
-def _build_router(gk: Gatekeeper) -> ToolRouter:
-    return ToolRouter(gatekeeper=gk, search_client=FakeSearchClient(results_per_query=2))
+def _build_router(gk: Gatekeeper, *, real_search: bool) -> ToolRouter:
+    """Build the Stage 4 :class:`ToolRouter`.
+
+    ``real_search=True`` swaps in the Stage 11
+    :class:`RealSearchClient` (Tavily), which raises
+    :class:`MissingSearchAPIKeyError` if neither
+    ``SEARCH_API_KEY`` nor ``TAVILY_API_KEY`` is set. Either way
+    the Gatekeeper + LRU cache still wrap every call.
+    """
+    client: SearchClient
+    if real_search:
+        from debate.sdk.real_search_client import RealSearchClient
+
+        client = RealSearchClient.from_env()
+    else:
+        client = FakeSearchClient(results_per_query=2)
+    return ToolRouter(gatekeeper=gk, search_client=client)
 
 
-def _build_judge_llm(*, model: str, fake: bool) -> LLMClient:
-    if not fake:
-        raise NotImplementedError(
-            "Real LLM provider mode is not wired up yet; pass --fake (default) "
-            "to run with the offline FakeLLMClient."
-        )
-    # ``model`` is recorded in the transcript so a future real-mode swap
+def _build_judge_llm(*, model: str, real_llm: bool) -> LLMClient:
+    """Build the Judge-side :class:`LLMClient`.
+
+    ``real_llm=True`` swaps in the Stage 11
+    :class:`RealLLMClient`, which raises
+    :class:`MissingLLMAPIKeyError` if neither ``LLM_API_KEY`` nor
+    ``OPENAI_API_KEY`` is set. Otherwise the offline
+    :class:`FakeLLMClient` is used (pre-loaded with the canned
+    Stage 10 verdict JSON for a clean demo).
+    """
+    if real_llm:
+        from debate.sdk.real_llm_client import RealLLMClient
+
+        kwargs: dict[str, Any] = {}
+        if model and model != "fake":
+            kwargs["model"] = model
+        return RealLLMClient.from_env(**kwargs)
+
+    # ``model`` is recorded in the transcript so a real-mode swap
     # can reuse the same CLI flag.
     del model
     return FakeLLMClient(response_text=DEFAULT_VERDICT_TEXT)
@@ -361,6 +426,25 @@ def _build_runs_dir(runs_root: Path, run_id: str | None) -> tuple[Path, RunLogge
     runs_root.mkdir(parents=True, exist_ok=True)
     logger = RunLogger(runs_root=runs_root, run_id=run_id)
     return logger.run_dir, logger
+
+
+def _resolve_modes(args: argparse.Namespace) -> tuple[bool, bool]:
+    """Return ``(use_real_llm, use_real_search)`` after collapsing
+    ``--fake`` / ``--no-fake`` / ``--real-llm`` / ``--real-search``.
+
+    Rules:
+
+    - Default: both real flags are off (full fake mode).
+    - ``--no-fake`` is shorthand for both real flags on, but a
+      caller-specified ``--real-llm`` / ``--real-search`` wins if
+      present.
+    - ``--real-llm`` and ``--real-search`` can be combined with
+      ``--fake`` (the default) so e.g. fake LLM + real search is a
+      legitimate hybrid demo mode.
+    """
+    real_llm = args.real_llm or (not args.fake)
+    real_search = args.real_search or (not args.fake)
+    return real_llm, real_search
 
 
 def run_live(args: argparse.Namespace, out: Any) -> int:
@@ -378,15 +462,24 @@ def run_live(args: argparse.Namespace, out: Any) -> int:
         out.write(f"error: --rounds must be in [1, 100], got {rounds}\n")
         return 1
 
+    real_llm, real_search = _resolve_modes(args)
+
     runs_root = Path(args.runs_root)
     run_dir, logger = _build_runs_dir(runs_root, args.run_id)
 
     gk = _build_gatekeeper(cfg)
-    router = _build_router(gk)
     fsm = DebateStateMachine(max_rounds=rounds)
 
     if not args.quiet:
-        _print_banner(out, motion=motion, rounds=rounds, run_dir=run_dir, fake=args.fake)
+        _print_banner(
+            out,
+            motion=motion,
+            rounds=rounds,
+            run_dir=run_dir,
+            fake=args.fake,
+            real_llm=real_llm,
+            real_search=real_search,
+        )
 
     logger.log(
         role="cli",
@@ -397,16 +490,38 @@ def run_live(args: argparse.Namespace, out: Any) -> int:
         model=args.model,
         seed=args.seed,
         fake=args.fake,
+        real_llm=real_llm,
+        real_search=real_search,
         version=__version__,
     )
 
     try:
-        judge_llm = _build_judge_llm(model=args.model, fake=args.fake)
-    except NotImplementedError as exc:
-        out.write(f"error: {exc}\n")
+        router = _build_router(gk, real_search=real_search)
+    except Exception as exc:  # noqa: BLE001 - top-level user-facing handler
+        logger.log(
+            role="cli",
+            turn_id=0,
+            event_type="cli_failed",
+            error=type(exc).__name__,
+            message=str(exc),
+        )
+        out.write(f"error: {type(exc).__name__}: {exc}\n")
         return 1
 
-    child_env = _build_child_env()
+    try:
+        judge_llm = _build_judge_llm(model=args.model, real_llm=real_llm)
+    except Exception as exc:  # noqa: BLE001 - top-level user-facing handler
+        logger.log(
+            role="cli",
+            turn_id=0,
+            event_type="cli_failed",
+            error=type(exc).__name__,
+            message=str(exc),
+        )
+        out.write(f"error: {type(exc).__name__}: {exc}\n")
+        return 1
+
+    child_env = _build_child_env(real_llm=real_llm)
 
     with Supervisor(
         runs_dir=run_dir,
@@ -471,21 +586,28 @@ def _safe_ledger_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _build_child_env() -> dict[str, str]:
+def _build_child_env(*, real_llm: bool = False) -> dict[str, str]:
     """Return a minimal env dict for child agent subprocesses.
 
     The :class:`Supervisor` further filters this through its own
-    allow-list and removes :data:`SEARCH_API_KEY` (defense in depth).
+    allow-list and removes search API keys (defense in depth).
     We deliberately copy through the bits Python needs to import
     ``debate.agents.pro_agent`` / ``con_agent`` (PYTHONPATH for the
     ``src/`` layout, plus Windows-essential vars).
+
+    When ``real_llm=True`` (Stage 11) we also forward the
+    ``LLM_API_KEY`` / ``OPENAI_API_KEY`` / ``OPENAI_BASE_URL`` /
+    ``OPENAI_MODEL`` values from the parent env (so the child's
+    ``RealLLMClient.from_env()`` finds them) and set
+    ``DEBATE_REAL_LLM=1`` to flip the child's ``__main__`` block
+    to the real client.
     """
     env: dict[str, str] = {
         "PATH": os.environ.get("PATH", ""),
         "PYTHONUNBUFFERED": "1",
         "PYTHONIOENCODING": "utf-8",
     }
-    for key in (
+    passthrough_keys = (
         "PYTHONPATH",
         "PYTHONHOME",
         "PYTHONDONTWRITEBYTECODE",
@@ -506,9 +628,17 @@ def _build_child_env() -> dict[str, str]:
         "LANG",
         "LC_ALL",
         "LC_CTYPE",
-    ):
+    )
+    for key in passthrough_keys:
         if key in os.environ:
             env[key] = os.environ[key]
+
+    if real_llm:
+        env["DEBATE_REAL_LLM"] = "1"
+        for key in ("LLM_API_KEY", "OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_MODEL"):
+            if key in os.environ:
+                env[key] = os.environ[key]
+
     src_path = Path(__file__).resolve().parents[1]
     if src_path.is_dir():
         existing = env.get("PYTHONPATH", "")

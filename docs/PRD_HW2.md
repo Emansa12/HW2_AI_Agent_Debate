@@ -125,4 +125,8 @@ that picks a single winner.
 
 See [`PLAN_HW2.md`](PLAN_HW2.md) for the execution plan and
 [`TODO_HW2.md`](TODO_HW2.md) for the granular checklist. As of
-Stage 10, all ten stages are DONE.
+Stage 11, the ten core stages are DONE plus optional real-provider
+support (Tavily search + OpenAI-compatible LLM) is wired in
+behind ``--real-search`` / ``--real-llm`` / ``--no-fake``. The
+default mode and the entire test suite remain offline - Stage 11
+adds **opt-in** capability without changing the grading path.
