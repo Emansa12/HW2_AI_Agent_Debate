@@ -67,65 +67,87 @@ not replace it.
 
 ![Tests passed](docs/assets/tests_passed.png)
 
-Shows the automated test suite and lint/format checks passing.
+Terminal capture of the three submission gates: `uv run pytest -q`, `uv run ruff
+check .`, and `uv run ruff format --check .`. The full offline suite passes (640+
+tests; one expected skip when a local `.env` is present), Ruff reports zero lint
+issues, and every tracked file is already formatted.
 
 ### Fake / offline demo
 
 ![Fake demo](docs/assets/fake_demo.png)
 
-Shows deterministic offline execution without API keys. This mode is only for
-testing/grading and is **not** proof of real LLM/search usage.
+Two-round run on "Is AI good for education?" with `--fake` — no API keys or
+network calls. The CLI prints the motion, run directory, and a **Final verdict**
+(Pro 50–40) whose rationale is explicitly tagged as a demo verdict from
+`FakeLLMClient`. Useful for deterministic tests and grading only; **not** proof of
+real LLM or search behavior.
 
 ### Real provider demo
 
 ![Real provider demo](docs/assets/real_provider_demo.png)
 
-Shows a real-provider run using `--no-fake`, with real LLM + real search enabled
-and a final verdict.
+Same motion with `--no-fake`; the session header shows **mode: real LLM + real
+search**. The Judge returns a live verdict (Pro 42–40) with LLM-generated
+rationale and three evidence-based reasons, and the transcript is written to
+`runs/<timestamp>/run.jsonl`.
 
 ### Replay demo
 
 ![Replay demo](docs/assets/replay_demo.png)
 
-Shows replay mode reading an existing `run.jsonl` transcript without making new
-LLM/search API calls.
+`--replay runs/<timestamp>/run.jsonl` re-prints the saved Judge event stream
+turn-by-turn without new LLM or search API calls. The replay summary counts 37
+records and reproduces the original winner (Pro 42–40), reason count, and
+`source=llm`.
 
 ### Search tool evidence
 
 ![Search tool evidence](docs/assets/search_tool_evidence.png)
 
-Shows that Pro and Con actually requested the search tool and that search
-results with URLs were returned.
+Excerpt from a real run's JSONL transcript: the Judge forwards a Pro `search`
+tool call, then emits `tool_result_sent` with Tavily hits — titles, URLs (including
+`.edu` sources), and snippet text. Confirms agents invoke search through the Judge
+broker, not by calling external APIs directly.
 
 ### Agent dialogue with opponent context
 
 ![Agent dialogue example](docs/assets/agent_dialogue_example.png)
 
-Shows readable Pro/Con replies. The Judge passes the opponent's previous answer
-as context, so each agent responds to the other side instead of writing unrelated
-standalone text.
+Readable `--print-transcript` output from a 10-round debate on mandatory AI
+content labeling. Shows opening, argument, and rebuttal phases for Pro and Con; a
+Con search call with three cited URLs; and a Pro rebuttal that quotes and counters
+the opponent's prior turn — evidence that each side responds to the other, not in
+isolation.
 
 ### Judge verdict
 
 ![Judge verdict reasons](docs/assets/judge_verdict_reasons.png)
 
-Shows the structured Judge verdict with winner, scores, reasons, and rationale.
+Structured **Judge verdict** footer from a live run: winner **Pro** (130 vs 120),
+three bullet reasons tied to rebuttals and cited evidence, and a one-line rationale
+summarizing why Pro carried the motion on mandatory labeling.
 
 ### Gatekeeper ledger
 
 ![Gatekeeper ledger](docs/assets/gatekeeper_ledger.png)
 
-Shows the Gatekeeper ledger tracking requests, input tokens, output tokens, total
-token usage, and estimated USD cost.
+Post-run **Gatekeeper ledger** from the same session: 3 LLM requests, 581 input /
+103 output tokens (684 total), and an estimated cost of ~$0.01 USD. Token use and
+spend are visible per run instead of hidden behind the agents.
 
 ### Pro and Con can both win
 
 ![Pro wins verdict](docs/assets/pro_wins_verdict.png)
+
+Real-provider run ending with **Final verdict: pro wins (130 vs 120)** on
+mandatory AI labeling — three judge reasons and a rationale citing stronger
+evidence and counter-rebuttals.
+
 ![Con wins verdict](docs/assets/con_wins_verdict.png)
 
-Shows that the Judge is not hardcoded to favor one side. Different runs can
-produce Pro or Con as the winner depending on argument quality, rebuttals,
-evidence, and cumulative scores.
+A different real run where **Con wins 97–96** after the closing round; the
+screenshot shows Con's final speech followed by the Judge verdict block. Together
+these runs show the outcome is score-driven, not hardcoded to either side.
 
 ## Readable session transcript
 
