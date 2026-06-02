@@ -63,45 +63,46 @@ supplement the implementation; they do not replace it.
 
 ## Screenshots
 
-### Automated tests and quality checks
+Real-provider evidence from live `--no-fake` runs (plus tests and replay). Each
+block below explains what the capture shows, then the image.
 
-![Tests passed](docs/assets/tests_passed.png)
+### Automated tests and quality checks
 
 Terminal capture of the three submission gates: `uv run pytest -q`, `uv run ruff
 check .`, and `uv run ruff format --check .`. The full offline suite passes (640+
 tests; one expected skip when a local `.env` is present), Ruff reports zero lint
 issues, and every tracked file is already formatted.
 
-### Real provider demo
+![Tests passed](docs/assets/tests_passed.png)
 
-![Real provider demo](docs/assets/real_provider_demo.png)
+### Real provider demo
 
 Same motion with `--no-fake`; the session header shows **mode: real LLM + real
 search**. The Judge returns a live verdict (Pro 42–40) with LLM-generated
 rationale and three evidence-based reasons, and the transcript is written to
 `runs/<timestamp>/run.jsonl`.
 
-### Replay demo
+![Real provider demo](docs/assets/real_provider_demo.png)
 
-![Replay demo](docs/assets/replay_demo.png)
+### Replay demo
 
 `--replay runs/<timestamp>/run.jsonl` re-prints the saved Judge event stream
 turn-by-turn without new LLM or search API calls. The replay summary counts 37
 records and reproduces the original winner (Pro 42–40), reason count, and
 `source=llm`.
 
-### Search tool evidence
+![Replay demo](docs/assets/replay_demo.png)
 
-![Search tool evidence](docs/assets/search_tool_evidence.png)
+### Search tool evidence
 
 Excerpt from a real run's JSONL transcript: the Judge forwards a Pro `search`
 tool call, then emits `tool_result_sent` with Tavily hits — titles, URLs (including
 `.edu` sources), and snippet text. Confirms agents invoke search through the Judge
 broker, not by calling external APIs directly.
 
-### Agent dialogue with opponent context
+![Search tool evidence](docs/assets/search_tool_evidence.png)
 
-![Agent dialogue example](docs/assets/agent_dialogue_example.png)
+### Agent dialogue with opponent context
 
 Readable `--print-transcript` output from a 10-round debate on mandatory AI
 content labeling. Shows opening, argument, and rebuttal phases for Pro and Con; a
@@ -109,35 +110,39 @@ Con search call with three cited URLs; and a Pro rebuttal that quotes and counte
 the opponent's prior turn — evidence that each side responds to the other, not in
 isolation.
 
-### Judge verdict
+![Agent dialogue example](docs/assets/agent_dialogue_example.png)
 
-![Judge verdict reasons](docs/assets/judge_verdict_reasons.png)
+### Judge verdict
 
 Structured **Judge verdict** footer from a live run: winner **Pro** (130 vs 120),
 three bullet reasons tied to rebuttals and cited evidence, and a one-line rationale
 summarizing why Pro carried the motion on mandatory labeling.
 
-### Gatekeeper ledger
+![Judge verdict reasons](docs/assets/judge_verdict_reasons.png)
 
-![Gatekeeper ledger](docs/assets/gatekeeper_ledger.png)
+### Gatekeeper ledger
 
 Post-run **Gatekeeper ledger** from the same session: 3 LLM requests, 581 input /
 103 output tokens (684 total), and an estimated cost of ~$0.01 USD. Token use and
 spend are visible per run instead of hidden behind the agents.
 
+![Gatekeeper ledger](docs/assets/gatekeeper_ledger.png)
+
 ### Pro and Con can both win
+
+The Judge is not hardcoded to either side — different runs can produce Pro or Con
+as the winner depending on argument quality, rebuttals, evidence, and cumulative
+scores.
+
+**Pro wins (130–120)** on mandatory AI labeling: three judge reasons and a
+rationale citing stronger evidence and counter-rebuttals.
 
 ![Pro wins verdict](docs/assets/pro_wins_verdict.png)
 
-Real-provider run ending with **Final verdict: pro wins (130 vs 120)** on
-mandatory AI labeling — three judge reasons and a rationale citing stronger
-evidence and counter-rebuttals.
+**Con wins (97–96)** after the closing round: Con's final speech followed by the
+Judge verdict block.
 
 ![Con wins verdict](docs/assets/con_wins_verdict.png)
-
-A different real run where **Con wins 97–96** after the closing round; the
-screenshot shows Con's final speech followed by the Judge verdict block. Together
-these runs show the outcome is score-driven, not hardcoded to either side.
 
 ## Readable session transcript (example run)
 
