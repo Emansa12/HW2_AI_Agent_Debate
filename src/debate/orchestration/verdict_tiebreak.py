@@ -14,9 +14,7 @@ if TYPE_CHECKING:
 
 def transcript_fingerprint(turns: list[TurnRecord]) -> str:
     """Stable digest input for tie-break when cumulative scores are equal."""
-    return "|".join(
-        f"{r.role}:{r.phase.value}:{r.round_number}:{r.content}" for r in turns
-    )
+    return "|".join(f"{r.role}:{r.phase.value}:{r.round_number}:{r.content}" for r in turns)
 
 
 def hash_pick_winner(transcript_blob: str) -> str:
@@ -122,8 +120,7 @@ def apply_tie_breaker(scores: dict[str, int], *, transcript_blob: str = "") -> V
     else:
         winner = hash_pick_winner(transcript_blob)
         rationale = (
-            f"tie-break: cumulative scores equal at {pro}; "
-            f"{winner} wins from transcript hash"
+            f"tie-break: cumulative scores equal at {pro}; {winner} wins from transcript hash"
         )
     final_scores = adjust_scores_for_winner({"pro": pro, "con": con}, winner)
     return Verdict(

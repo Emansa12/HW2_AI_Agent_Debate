@@ -10,8 +10,9 @@
   ```
 - **Transcript path:** `runs/20260602T120944_074190Z/run.jsonl`
 - **Note:** the generated run artifact is local and ignored by Git.
+This document is a cleaned, human-readable summary of the run. The raw `run.jsonl` artifact remains local and is not committed.
 
-## Architecture summary
+## Architecture in this session
 
 - The **Judge** runs in the parent CLI process and orchestrates the debate.
 - **Pro** and **Con** run as separate child subprocesses (`debate.agents.pro_agent` / `con_agent`).
@@ -36,6 +37,8 @@
   1. **Why AI-Generated Content Labeling Mandates Fall Short** — https://itif.org/publications/2024/12/16/why-ai-generated-content-labeling-mandates-fall-short
   2. **AI labeling requirement starting in 2026: What you need to know** — https://weventure.de/en/blog/ai-labeling
   3. **[PDF] Labeling AI-Generated Content:** — https://computing.mit.edu/wp-content/uploads/2023/11/AI-Policy_Labeling.pdf
+
+This session uses 10 argument rounds per side. The closing turn appears after round 9, followed by the Judge verdict.
 
 ## Debate flow
 

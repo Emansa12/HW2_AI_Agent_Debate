@@ -3,77 +3,163 @@
 A multi-agent debate system where a **Pro** agent and a **Con**
 agent argue a single motion. The **Judge / Parent process** is the
 central controller; Pro and Con are sandboxed child processes that
-**never communicate directly** - every message between them is
+**never communicate directly** — every message between them is
 routed through the Judge over JSONL IPC on stdin/stdout.
 
-> **Status: Stage 11 done.** End-to-end debate runs from the
-> terminal, writes a JSONL transcript under
-> `runs/<timestamp>/run.jsonl`, supports replay, and ships with a
-> JSON Schema for verdicts. Default mode is **fully offline** (fake
-> LLM / fake search), so no API keys are required - that is the
-> grading path. Stage 11 added **opt-in** real-provider clients
-> (Tavily search + OpenAI-compatible LLM) behind ``--real-search``
-> and ``--real-llm`` flags.
+> **Status: final submission.** End-to-end debate runs from the
+> terminal, writes a JSONL transcript under `runs/<timestamp>/run.jsonl`,
+> supports replay, and ships with a JSON Schema for verdicts. Default
+> mode is **fully offline** (fake LLM / fake search) for deterministic
+> tests and grading. Real-provider behavior is demonstrated separately
+> with `--no-fake` (OpenAI-compatible LLM + Tavily search).
 
 ## Quick start
 
 ```bash
 uv sync
 
-# Run a fresh demo debate (offline, fake LLM, 2 rounds per side)
+# Offline demo (default — no API keys)
 uv run python -m debate.main --motion "Is AI good for education?" --rounds 2 --fake
 
 # Replay a previous transcript
 uv run python -m debate.main --replay runs/<timestamp>/run.jsonl
 
-# Tests + lint
+# Quality checks
 uv run pytest -q
 uv run ruff check .
 uv run ruff format --check .
 ```
 
-### Optional: real-provider modes (Stage 11)
+## Demo evidence
+
+The project was verified with:
+
+- **Fake / offline mode** — deterministic runs without API keys (`--fake`, default)
+- **Real provider mode** — live LLM + search via `--no-fake`
+- **Replay mode** — re-read an existing `run.jsonl` without new API calls
+- **Readable transcript output** — `--print-transcript` after live runs
+- **Real search tool calls** — Pro/Con `tool_call` brokered through Judge → ToolRouter → Gatekeeper → Tavily
+- **Automated quality checks** — full pytest suite plus ruff lint/format gates
+
+Commands used for verification:
 
 ```bash
-# Hybrid: real Tavily search, fake LLM (cheapest sanity check)
-uv run python -m debate.main --motion "..." --rounds 2 --fake --real-search
+uv run pytest -q
+uv run ruff check .
+uv run ruff format --check .
 
-# Full real-provider mode: real OpenAI-compatible LLM + real search
-uv run python -m debate.main --motion "..." --rounds 2 --no-fake
-
-# Same, with a readable terminal summary after the run
+uv run python -m debate.main --rounds 10 --no-fake --print-transcript
 uv run python -m debate.main --motion "Should schools ban smartphones?" --rounds 2 --no-fake --print-transcript
-
-# Equivalent to --no-fake, but explicit:
-uv run python -m debate.main --motion "..." --rounds 2 --real-llm --real-search
+uv run python -m debate.main --replay runs/<timestamp>/run.jsonl
 ```
 
-Real modes read keys from the environment only (`LLM_API_KEY` /
-`OPENAI_API_KEY` for the LLM, `SEARCH_API_KEY` /
-`TAVILY_API_KEY` for search). See [Security](#security) below and
-the comments in `.env-example`. A local `--no-fake` run was
-verified with real LLM + real search using environment variables;
-generated runs and `.env` are not committed.
+Generated `runs/<timestamp>/run.jsonl` files are **local artifacts** and are
+ignored by Git (see `.gitignore`). Only `runs/.gitkeep` is tracked so a fresh
+clone can write transcripts immediately.
+
+Screenshots, a readable session write-up, tests, and source code together form
+the submission evidence — screenshots supplement the implementation; they do
+not replace it.
+
+## Screenshots
+
+### Automated tests and quality checks
+
+![Tests passed](docs/assets/tests_passed.png)
+
+Shows the automated test suite and lint/format checks passing.
+
+### Fake / offline demo
+
+![Fake demo](docs/assets/fake_demo.png)
+
+Shows deterministic offline execution without API keys. This mode is only for
+testing/grading and is **not** proof of real LLM/search usage.
+
+### Real provider demo
+
+![Real provider demo](docs/assets/real_provider_demo.png)
+
+Shows a real-provider run using `--no-fake`, with real LLM + real search enabled
+and a final verdict.
+
+### Replay demo
+
+![Replay demo](docs/assets/replay_demo.png)
+
+Shows replay mode reading an existing `run.jsonl` transcript without making new
+LLM/search API calls.
+
+### Search tool evidence
+
+![Search tool evidence](docs/assets/search_tool_evidence.png)
+
+Shows that Pro and Con actually requested the search tool and that search
+results with URLs were returned.
+
+### Agent dialogue with opponent context
+
+![Agent dialogue example](docs/assets/agent_dialogue_example.png)
+
+Shows readable Pro/Con replies. The Judge passes the opponent's previous answer
+as context, so each agent responds to the other side instead of writing unrelated
+standalone text.
+
+### Judge verdict
+
+![Judge verdict reasons](docs/assets/judge_verdict_reasons.png)
+
+Shows the structured Judge verdict with winner, scores, reasons, and rationale.
+
+### Gatekeeper ledger
+
+![Gatekeeper ledger](docs/assets/gatekeeper_ledger.png)
+
+Shows the Gatekeeper ledger tracking requests, input tokens, output tokens, total
+token usage, and estimated USD cost.
+
+### Pro and Con can both win
+
+![Pro wins verdict](docs/assets/pro_wins_verdict.png)
+![Con wins verdict](docs/assets/con_wins_verdict.png)
+
+Shows that the Judge is not hardcoded to favor one side. Different runs can
+produce Pro or Con as the winner depending on argument quality, rebuttals,
+evidence, and cumulative scores.
+
+## Readable session transcript
+
+Every live run writes `runs/<timestamp>/run.jsonl`. The transcript includes:
+
+- motion
+- prompts sent by the Judge
+- Pro and Con replies
+- search tool calls and search results
+- score events
+- final Judge verdict
+- Gatekeeper ledger snapshot
+
+The generated `run.jsonl` artifact is local and ignored by Git. A cleaned,
+readable example from a real 10-round provider run is in `docs/session_demo.md`.
+
+See the full readable session example: [docs/session_demo.md](docs/session_demo.md)
+
+Pass `--print-transcript` after a live run for a condensed terminal summary; use
+`--replay runs/<timestamp>/run.jsonl` to re-display a saved run without API cost.
 
 ## HW2 assignment context
 
 This homework asks for a **multi-agent debate** with at least two
-agents (Pro and Con) and a Judge that decides the winner. The
-project has the following hard requirements (see
-`docs/PRD_HW2.md` for the full list):
+agents (Pro and Con) and a Judge that decides the winner. Hard
+requirements (see [`docs/PRD_HW2.md`](docs/PRD_HW2.md)):
 
-- Pro and Con must run as **separate processes** and may not
-  communicate directly.
-- All inter-process traffic uses **JSONL** messages with a fixed
-  Pydantic schema (see `src/debate/sdk/schemas.py`).
-- A **Gatekeeper** must enforce per-turn / per-debate budgets on
-  LLM and search calls.
-- A **search tool** with a cache must be available to the
-  debaters; the cache and budget are enforced by the parent.
-- A **Watchdog** must detect dead / stuck children.
-- The final **Verdict** must pick one side (`pro` or `con`) - tie
-  is forbidden by the schema.
-- A complete debate transcript must be written to disk as JSONL.
+- Pro and Con run as **separate processes** and may not communicate directly.
+- All inter-process traffic uses **JSONL** messages with a fixed Pydantic schema.
+- A **Gatekeeper** enforces per-turn / per-debate budgets on LLM and search calls.
+- A **search tool** with cache, brokered by the parent.
+- A **Watchdog** detects dead / stuck children.
+- The final **Verdict** picks one side (`pro` or `con`) — ties are forbidden.
+- A complete debate transcript is written to disk as JSONL.
 
 ## Architecture
 
@@ -99,11 +185,10 @@ project has the following hard requirements (see
                 |          |          |
    +------------+          v          v
    |   spawns          search      ledger
-   |   real            (cached)    (tokens / USD / RPM)
-   v   subprocesses
+   |   subprocesses    (cached)    (tokens / USD / RPM)
+   v
 +--------+   +--------+
-| Pro    |   | Con    |  <-- BaseAgent + DebaterAgent
-| agent  |   | agent  |      (FakeLLMClient by default)
+| Pro    |   | Con    |  <-- DebaterAgent children
 +--------+   +--------+
    |             |
    +--JSONL IPC--+
@@ -113,190 +198,68 @@ project has the following hard requirements (see
       RunLogger -> runs/<id>/run.jsonl
 ```
 
+Search calls flow:
+**Debater → Judge → ToolRouter → Gatekeeper → RealSearchClient (Tavily)** in
+real mode, or **FakeSearchClient** offline.
+
 ### Component roles
 
 | Component | Module | Responsibility |
 |-----------|--------|----------------|
-| **Judge** | `debate.orchestration.judge` | Parent / central controller. Spawns children, alternates Pro/Con turns, validates replies, routes tool calls, scores turns, generates the final verdict, applies the deterministic tie-breaker. |
-| **Pro / Con agents** | `debate.agents.{pro,con}_agent` + `debate.agents.debater_agent` | Child subprocesses. Receive `prompt` / `tool_result` / `ping`, reply with `argument` / `tool_call` / `pong`. Stance-only subclass on top of `DebaterAgent`. Each reply is capped at **5 short lines** and must directly address `opponent_last` when the Judge supplies it. |
-| **Supervisor** | `debate.orchestration.supervisor` | Owns the JSONL stdin/stdout pipes for each child. `spawn` / `send` / `receive` / `terminate` / `respawn`. Filters env to a strict allow-list (no `SEARCH_API_KEY` ever). |
-| **State machine** | `debate.orchestration.state_machine` | Pure FSM. Drives the legal sequence of debate states (init -> openings -> rounds -> closings -> verdict). |
-| **Watchdog** | `debate.orchestration.watchdog` | Liveness monitor. Sends `ping`, expects `pong`, calls `on_miss(role)` if the child is unresponsive. Does not own the recovery policy. |
-| **JSONL IPC** | `debate.orchestration.ipc` | `serialize_message` / `deserialize_message`. Length-checked, schema-validated. |
-| **Gatekeeper** | `debate.shared.gatekeeper` | Budget gate. Enforces tokens/turn, tokens/debate, USD/debate, RPM. Updates a structured `Ledger`. Wraps every LLM and search call. |
-| **ToolRouter** | `debate.shared.router` | Single dispatch surface for tool calls (`call(tool_name, **kw)`). Currently knows only `search`. Wraps a `SearchClient` with an LRU cache. Raises `UnknownToolError` for any other tool. |
-| **RunLogger** | `debate.shared.logger` | Structured JSONL logger. One record per event. Stamped with `ts`, `role`, `turn_id`, `event_type`. Redacts known secret patterns. |
-| **DebateConfig** | `debate.shared.config` | Loads `config/debate.json` and `config/motions.json`. Numeric-bounds-validated Pydantic model. |
-| **CLI** | `debate.main` | `argparse` wrapper that wires every component above and writes the per-run transcript directory. |
+| **Judge** | `debate.orchestration.judge` | Parent controller: spawns children, alternates turns, validates replies, routes tool calls, scores turns, generates verdict. |
+| **Pro / Con** | `debate.agents.{pro,con}_agent` | Child subprocesses; replies capped at **5 lines**; must address `opponent_last` when supplied. |
+| **Supervisor** | `debate.orchestration.supervisor` | JSONL stdin/stdout pipes; env allow-list (no search keys in children). |
+| **Gatekeeper** | `debate.shared.gatekeeper` | Budget gate + ledger (tokens, USD, RPM). |
+| **ToolRouter** | `debate.shared.router` | Dispatches `search` through one controlled surface with LRU cache. |
+| **RunLogger** | `debate.shared.logger` | Structured JSONL transcript with redaction. |
 
-### Verdict rules (Stage 9)
+### Verdict rules
 
-The Stage 9 verdict pipeline is strict:
+1. The Judge calls the LLM for a verdict JSON (reasons + rationale).
+2. Invalid responses retry once; persistent failure uses deterministic tie-break.
+3. The **final winner aligns with cumulative per-turn scores** from the debate;
+   the LLM supplies reasons but does not hardcode a side.
+4. When cumulative scores tie, a transcript hash picks the winner (~50/50 across
+   different debates on the same motion).
+5. Visible verdict scores are never equal; tie-break adjustments are logged in
+   `run.jsonl` as `verdict_tiebreak_applied` / `tiebreak_reason`.
 
-1. The Judge calls the LLM once for a verdict.
-2. The response is parsed as JSON. If parsing or validation fails,
-   the Judge **retries once**.
-3. If the second attempt is still invalid (or the LLM tries to
-   declare a tie), the Judge applies a **deterministic tie-break**:
-   the side with the higher cumulative score wins; if cumulative
-   scores are exactly equal, **Con** wins.
-4. If the LLM returns **equal** `scores.pro` and `scores.con`, the
-   Judge applies the same tie-break rules (prefer the valid
-   `winner` field, else cumulative scores, else Con) and bumps the
-   winner's score by one so the visible verdict never shows a tie
-   (e.g. `pro=120 con=120` with `winner=pro` becomes
-   `pro=121 con=120`). The adjustment is logged as
-   `verdict_tiebreak_applied` / `tiebreak_reason` in `run.jsonl`.
-5. The final `Verdict` is logged as `verdict_recorded` and
-   immediately followed by `debate_done`.
+The Judge is **not hardcoded** to favor Pro or Con — see the Pro/Con verdict
+screenshots above and [`docs/session_demo.md`](docs/session_demo.md).
 
-The `winner` field is constrained at the schema level
-(`Literal["pro", "con"]`); ties cannot survive even a malicious
-LLM response.
+## AI-assisted workflow
 
-The Judge is **not hardcoded** to favor Pro or Con. The winner is
-produced by the validated LLM verdict pipeline; unit tests mock both
-Pro-winning and Con-winning verdicts, and real-provider demo runs
-can yield different winners depending on motion and argument quality.
-Deterministic tie-break applies only when the LLM verdict is invalid
-or final scores are exactly tied; on cumulative-score ties Con wins
-by the documented fallback rule.
+The project was developed using an AI-assisted workflow. Prompts and agent
+behavior are documented in [`PROMPTS.md`](PROMPTS.md). Development followed an
+iterative loop:
 
-## Project layout
+1. design (PRD / plan)
+2. implementation
+3. tests
+4. real-provider demo
+5. replay verification
+6. README / session evidence
 
-```
-HW2_AI_Agent_Debate/
-├── pyproject.toml             # uv / pytest / ruff config
-├── README.md                  # this file
-├── PROMPTS.md                 # authoritative agent prompts + verdict contract
-├── .env-example               # placeholders only, NEVER real keys
-├── .gitignore                 # ignores runs/* but keeps runs/.gitkeep
-├── config/
-│   ├── debate.json            # default DebateConfig (10 rounds, budgets, timeouts)
-│   ├── motions.json           # bundled debate motions
-│   └── prompts/
-│       └── verdict.schema.json  # JSON Schema mirror of Verdict + validate_verdict
-├── docs/
-│   ├── PRD_HW2.md             # product requirements (hard / soft)
-│   ├── PLAN_HW2.md            # architecture + per-stage plan
-│   └── TODO_HW2.md            # per-stage checklist with evidence
-├── runs/
-│   └── .gitkeep               # directory tracked, contents ignored
-├── src/
-│   └── debate/
-│       ├── __init__.py
-│       ├── __main__.py        # `python -m debate` -> debate.main:main
-│       ├── main.py            # CLI / end-to-end wiring (Stage 10)
-│       ├── sdk/               # public wire schemas + LLM/Search clients
-│       ├── shared/            # config, gatekeeper, router, logger, redaction
-│       ├── orchestration/     # judge, supervisor, state machine, watchdog, ipc
-│       └── agents/            # base_agent, debater_agent, pro_agent, con_agent
-└── tests/
-    ├── conftest.py
-    ├── test_smoke.py
-    ├── unit/                  # pure / fast tests (~520 tests)
-    └── integration/           # subprocess + e2e tests (~50 tests)
-```
+Prompt instructions were refined to:
 
-## Requirements
+- keep debater replies concise (max 5 lines)
+- make each answer depend on `opponent_last`
+- require search tool usage when real search is enabled
+- keep Pro and Con in their assigned stances
 
-- Python **>= 3.11**
-- [uv](https://docs.astral.sh/uv/) for environment + dependency management
-- `pytest` for tests, `ruff` for lint / format
+## Costs and resource awareness
 
-## Setup
+Real LLM/search usage has cost. The Gatekeeper tracks request count, input tokens,
+output tokens, total tokens, and estimated USD spend; the ledger is recorded at
+the end of each run (`cli_finished` in `run.jsonl` and the terminal summary).
 
-```bash
-# 1. Install uv (see https://docs.astral.sh/uv/)
-# 2. Create the venv and install dev deps
-uv sync
+The Gatekeeper ledger records request count, input/output token counts, total
+token usage, and estimated USD cost. This makes real-provider usage measurable
+instead of hidden — see `docs/assets/gatekeeper_ledger.png`.
 
-# 3. Optional - copy the env template (no real keys required to run)
-cp .env-example .env       # PowerShell:  Copy-Item .env-example .env
-```
+**Fake mode** exists so tests and grading can run without spending API credits.
 
-## Running a debate
-
-The CLI lives in `debate.main` (also reachable as `python -m debate`).
-
-```bash
-# Default - fake LLM + fake search, 10 rounds per side, motion from config/motions.json
-uv run python -m debate.main
-
-# Custom motion, 2 rounds, fully offline
-uv run python -m debate.main --motion "Is AI good for education?" --rounds 2 --fake
-
-# Replay a saved transcript (no LLM, no search, no subprocess spawn)
-uv run python -m debate.main --replay runs/<timestamp>/run.jsonl
-
-# Quiet mode (suppresses banner + summary; transcript is still written)
-uv run python -m debate.main --rounds 2 --quiet
-```
-
-Debater replies are **concise 5-line turns**: Pro and Con are
-instructed (and post-truncated) to at most five short lines per
-reply. The Judge passes `opponent_last` on argument and closing
-turns so each side must rebut or refine the previous point instead
-of writing unrelated essays.
-
-### Useful flags
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--motion <text>` | first entry of `config/motions.json` | Debate topic |
-| `--rounds <int>` | `DebateConfig.rounds` (10) | Argument rounds per side, capped at 100 |
-| `--model <id>` | `fake` | LLM model identifier. Used when `--real-llm` is set; passed through to RealLLMClient. |
-| `--seed <int>` | unset | Optional Python `random.seed` for reproducibility |
-| `--fake` | on | Use offline FakeLLMClient + FakeSearchClient. **Default.** |
-| `--no-fake` | off | Shorthand for `--real-llm --real-search`. Requires both API keys. |
-| `--real-search` | off | Stage 11: use Tavily-backed `RealSearchClient`. Requires `SEARCH_API_KEY` (or `TAVILY_API_KEY`). Combinable with `--fake`. |
-| `--real-llm` | off | Stage 11: use OpenAI-compatible `RealLLMClient` for Judge + Pro/Con. Requires `LLM_API_KEY` (or `OPENAI_API_KEY`). |
-| `--config <path>` | `config/debate.json` | Override DebateConfig location |
-| `--motions-file <path>` | `config/motions.json` | Override motions file |
-| `--runs-root <path>` | `runs/` | Where the per-run directory is created |
-| `--run-id <id>` | UTC timestamp | Force a specific run id |
-| `--replay <path>` | unset | Replay a saved `run.jsonl` and exit |
-| `--quiet` | off | Suppress banner / summary output |
-| `--print-transcript` | off | After a live run, print a readable transcript summary to the terminal (full JSONL still written under `runs/`) |
-| `--version` | - | Print package version |
-
-### Transcript
-
-Every live run writes:
-
-```
-runs/<run_id>/
-├── run.jsonl            # JSONL event log (one JSON object per line)
-├── pro_stderr.log       # stderr captured from the Pro subprocess
-└── con_stderr.log       # stderr captured from the Con subprocess
-```
-
-`run.jsonl` records contain at minimum `ts`, `role`, `turn_id`, and
-`event_type`. The required event types are:
-
-`cli_invoked`, `debate_started`, `children_spawned`, `init_sent`,
-`prompt_sent`, `reply_received`, `tool_call_received` (when used),
-`tool_result_sent` (when used), `score_recorded`,
-`verdict_llm_response`, `verdict_recorded`, `debate_done`,
-`cli_finished` (with the gatekeeper ledger snapshot).
-
-Each record is readable, redacted session content: Judge
-`prompt_sent` payloads (`prompt_payload`, `prompt_text`,
-`prompt_length`), Pro/Con `reply_received` bodies with
-`content_length`, verdict fields (`verdict_text`, `winner`,
-`scores`, `reasons`), and `tool_call_received` /
-`tool_result_sent` when search is brokered.
-
-Pass `--print-transcript` after a live run to print a condensed,
-human-readable summary (motion, search calls/results, agent
-replies, verdict, gatekeeper ledger) to the terminal. The full
-artifact remains in `runs/<timestamp>/run.jsonl`; replay mode
-(`--replay`) is unchanged.
-
-Replay mode (`--replay`) reads only this file - it never spawns a
-subprocess and never imports `LLMClient` or `SearchClient`.
-
-## Testing
+## Quality standards
 
 ```bash
 uv run pytest -q
@@ -304,62 +267,135 @@ uv run ruff check .
 uv run ruff format --check .
 ```
 
-The full suite is **fake / offline by default**. Integration tests
-spawn real Pro/Con subprocesses but those subprocesses use
-`FakeLLMClient`, so no network and no API keys are required.
+- **`pytest`** — unit and integration behavior (full offline test suite; offline by default)
+- **`ruff check`** — linting
+- **`ruff format --check`** — formatting consistency
 
-## Security
+See `docs/assets/tests_passed.png` for a passing run of these checks.
 
-- `.env` is in `.gitignore`. `.env-example` ships with **empty**
-  placeholders only - tests pin this with a regex sweep for
-  `sk-…`, `AKIA…`, and Google API key shapes
-  (see `tests/unit/test_housekeeping.py`).
-- API keys are read from the **environment only**. They never
-  appear in source, config, prompts, transcripts, or logs.
-  `RunLogger` redacts known secret patterns (`sk-…`, `AKIA…`,
-  Google keys, JWT-shaped tokens) before writing to disk.
-- Real-provider clients (Stage 11) only ever pass the key as the
-  `Authorization: Bearer …` request header to `httpx`. The key is
-  never embedded in URLs, request bodies, or error messages.
-- The `Supervisor` filters the child env to an explicit allow-list
-  AND applies a deny-list. Pro and Con processes never see any
-  search key (`SEARCH_API_KEY` / `TAVILY_API_KEY` /
-  `BRAVE_SEARCH_API_KEY` / `SERPAPI_API_KEY` are blocked) - search
-  is **always** brokered by the parent's Judge → ToolRouter →
-  Gatekeeper.
-- The default demo and the entire test suite never require any
-  real API key. Real-provider tests use `httpx.MockTransport` for
-  synthetic responses, so CI works offline.
+## Extensibility
 
-## Current limitations
+The system is designed to be extended:
 
-- Stage 11 shipped real clients for **search** (Tavily) and the
-  **LLM** (OpenAI-compatible Chat Completions). Both default to
-  off; the full pipeline still works on `FakeLLMClient` /
-  `FakeSearchClient` for the grading run.
-- The OpenAI-compatible RealLLMClient was tested against the
-  Chat Completions JSON schema only. Streaming responses, tool
-  calls, and JSON-mode are not used by the Judge prompt; if you
-  swap in a provider that requires those, you may need a small
-  client subclass.
-- `--seed` only seeds the `random` module. `FakeLLMClient` is
-  already deterministic, and `RealLLMClient`'s determinism
-  depends entirely on the upstream provider's `temperature`
-  (default 0.2). The seed is recorded in the transcript for
-  reproducibility book-keeping.
-- `--real-llm` swaps the LLM for both the Judge AND the Pro/Con
-  subprocesses (so the children also call the real provider).
-  This obviously costs money and goes through the Gatekeeper
-  budget; set the budgets in `config/debate.json` accordingly.
+- **Current tool:** `search` (brokered, cached, budgeted)
+- **ToolRouter** dispatches tools through one controlled surface — new skills can
+  be added without giving child agents direct API access.
+- **Search path:** Debater → Judge → ToolRouter → Gatekeeper → search client
+- **Replaceable providers:**
+  - `FakeSearchClient` — offline tests
+  - `RealSearchClient` / Tavily — real search
+  - `FakeLLMClient` — deterministic tests
+  - `RealLLMClient` — OpenAI-compatible LLM
+- API keys are configured through **environment variables**, never hardcoded.
+
+## Fake vs real provider modes
+
+| | Fake (default) | Real (`--no-fake`) |
+|---|----------------|---------------------|
+| LLM | `FakeLLMClient` | `RealLLMClient` (OpenAI-compatible) |
+| Search | `FakeSearchClient` | `RealSearchClient` (Tavily) |
+| API keys | Not required | Required in local `.env` |
+| Purpose | Tests, deterministic grading | Live demo / assignment proof |
+
+Fake mode is provided so the project can be tested deterministically without
+API keys or network access. **Fake screenshots are not proof of real LLM/search
+usage.** The real-provider behavior is demonstrated separately with `--no-fake`,
+which uses an OpenAI-compatible LLM and Tavily-backed search through environment
+variables.
+
+```bash
+# Real provider (requires keys in local .env)
+uv run python -m debate.main --rounds 10 --no-fake --print-transcript
+
+# Hybrid examples
+uv run python -m debate.main --rounds 2 --fake --real-search
+uv run python -m debate.main --rounds 2 --real-llm --real-search
+```
+
+## Security and submission notes
+
+- **Never commit `.env`** — it is in `.gitignore`.
+- **Never commit real API keys** — not in README, docs, screenshots, or code.
+- Commit only **`.env-example`** with empty placeholders.
+- Graders can copy `.env-example` → `.env` and add their own keys locally.
+- **`runs/`** artifacts are ignored except `runs/.gitkeep`.
+- **`.pytest_cache/`** is ignored — do not commit it.
+- Screenshots must not contain API keys or `.env` contents.
+
+See also [`tests/unit/test_housekeeping.py`](tests/unit/test_housekeeping.py) for
+secret-pattern checks on committed files.
+
+## Project layout
+
+```
+HW2_AI_Agent_Debate/
+├── pyproject.toml
+├── README.md
+├── PROMPTS.md
+├── .env-example              # placeholders only
+├── config/
+│   ├── debate.json
+│   ├── motions.json
+│   └── prompts/verdict.schema.json
+├── docs/
+│   ├── PRD_HW2.md
+│   ├── PLAN_HW2.md
+│   ├── TODO_HW2.md
+│   ├── session_demo.md       # readable real-provider session example
+│   └── assets/                 # submission screenshots
+├── runs/.gitkeep               # contents ignored
+├── src/debate/                 # package source
+└── tests/                      # unit + integration
+```
+
+## Running a debate
+
+```bash
+# Default — fake LLM + fake search, 10 rounds, motion from config/motions.json
+uv run python -m debate.main
+
+# Custom motion, offline
+uv run python -m debate.main --motion "Is AI good for education?" --rounds 2 --fake
+
+# Real provider + readable terminal summary
+uv run python -m debate.main --motion "Should schools ban smartphones?" --rounds 2 --no-fake --print-transcript
+
+# Replay (no subprocess, no API)
+uv run python -m debate.main --replay runs/<timestamp>/run.jsonl
+```
+
+### Useful flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--motion <text>` | first entry in `config/motions.json` | Debate topic |
+| `--rounds <int>` | 10 | Argument rounds per side |
+| `--fake` | on | Offline FakeLLM + FakeSearch |
+| `--no-fake` | off | Real LLM + real search (needs keys) |
+| `--real-llm` / `--real-search` | off | Enable one real provider while keeping the other fake |
+| `--print-transcript` | off | Readable summary after a live run |
+| `--replay <path>` | unset | Replay `run.jsonl` and exit |
+| `--quiet` | off | Suppress banner / summary |
+
+## Setup
+
+```bash
+uv sync
+cp .env-example .env    # optional — only for --no-fake
+```
+
+Python **>= 3.11** and [uv](https://docs.astral.sh/uv/) are required.
 
 ## Documentation
 
-- [`docs/PRD_HW2.md`](docs/PRD_HW2.md) - hard requirements,
-  architecture, protocol, runtime defaults, success criteria.
-- [`docs/PLAN_HW2.md`](docs/PLAN_HW2.md) - architecture diagram,
-  component responsibilities, per-stage execution plan, design
-  notes.
-- [`docs/TODO_HW2.md`](docs/TODO_HW2.md) - per-stage checklist
-  with evidence.
-- [`PROMPTS.md`](PROMPTS.md) - authoritative agent prompts +
-  verdict JSON contract.
+- [`docs/session_demo.md`](docs/session_demo.md) — readable real-provider session
+- [`docs/PRD_HW2.md`](docs/PRD_HW2.md) — requirements
+- [`docs/PLAN_HW2.md`](docs/PLAN_HW2.md) — architecture and stages
+- [`docs/TODO_HW2.md`](docs/TODO_HW2.md) — checklist with evidence
+- [`PROMPTS.md`](PROMPTS.md) — agent prompts and verdict contract
+
+## Current limitations
+
+- Real LLM client targets OpenAI-compatible Chat Completions (non-streaming).
+- `--real-llm` swaps the LLM for Judge **and** Pro/Con children (costs real tokens).
+- `--seed` seeds Python `random` only; LLM stochasticity depends on provider temperature.

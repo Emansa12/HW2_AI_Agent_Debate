@@ -125,9 +125,7 @@ class Judge:
     def validate_verdict(self, verdict: Verdict) -> None:
         vp.validate_verdict(verdict)
 
-    def apply_tie_breaker(
-        self, scores: dict[str, int], *, transcript_blob: str = ""
-    ) -> Verdict:
+    def apply_tie_breaker(self, scores: dict[str, int], *, transcript_blob: str = "") -> Verdict:
         return vp.apply_tie_breaker(scores, transcript_blob=transcript_blob)
 
     def _finalize_verdict(self, verdict: Verdict) -> tuple[Verdict, bool, str | None]:
