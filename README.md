@@ -57,9 +57,9 @@ Generated `runs/<timestamp>/run.jsonl` files are **local artifacts** and are
 ignored by Git (see `.gitignore`). Only `runs/.gitkeep` is tracked so a fresh
 clone can write transcripts immediately.
 
-Screenshots, a readable session write-up, tests, and source code together form
-the submission evidence — screenshots supplement the implementation; they do
-not replace it.
+Screenshots, a readable session write-up ([`docs/session_demo.md`](docs/session_demo.md)),
+tests, and source code together form the submission evidence — screenshots
+supplement the implementation; they do not replace it.
 
 ## Screenshots
 
@@ -139,7 +139,16 @@ A different real run where **Con wins 97–96** after the closing round; the
 screenshot shows Con's final speech followed by the Judge verdict block. Together
 these runs show the outcome is score-driven, not hardcoded to either side.
 
-## Readable session transcript
+## Readable session transcript (example run)
+
+**Looking for a full run example?** Open [`docs/session_demo.md`](docs/session_demo.md) —
+a cleaned, human-readable write-up of a real 10-round provider session
+(`--no-fake --print-transcript`) on mandatory AI content labeling. It shows how
+the system behaves end to end: session metadata, architecture, search tool
+evidence with URLs, sample Pro/Con dialogue and rebuttals, score progression,
+the final Judge verdict, and the Gatekeeper ledger. Raw `run.jsonl` artifacts
+under `runs/` are local and not committed; this file is the included example
+for graders who want evidence without re-running the debate.
 
 Every live run writes `runs/<timestamp>/run.jsonl`. The transcript includes:
 
@@ -150,11 +159,6 @@ Every live run writes `runs/<timestamp>/run.jsonl`. The transcript includes:
 - score events
 - final Judge verdict
 - Gatekeeper ledger snapshot
-
-The generated `run.jsonl` artifact is local and ignored by Git. A cleaned,
-readable example from a real 10-round provider run is in `docs/session_demo.md`.
-
-See the full readable session example: [docs/session_demo.md](docs/session_demo.md)
 
 Pass `--print-transcript` after a live run for a condensed terminal summary; use
 `--replay runs/<timestamp>/run.jsonl` to re-display a saved run without API cost.
