@@ -63,86 +63,76 @@ supplement the implementation; they do not replace it.
 
 ## Screenshots
 
-Real-provider evidence from live `--no-fake` runs (plus tests and replay). Each
-block below explains what the capture shows, then the image.
+Real-provider evidence from live `--no-fake` runs (plus tests and replay).
 
-### Automated tests and quality checks
+**Automated tests and quality checks.** Terminal capture of the three submission
+gates: `uv run pytest -q`, `uv run ruff check .`, and `uv run ruff format --check .`.
+The full offline suite passes (640+ tests; one expected skip when a local `.env` is
+present), Ruff reports zero lint issues, and every tracked file is already formatted.
+<p><img src="docs/assets/tests_passed.png" alt="Tests passed" width="100%"></p>
 
-Terminal capture of the three submission gates: `uv run pytest -q`, `uv run ruff
-check .`, and `uv run ruff format --check .`. The full offline suite passes (640+
-tests; one expected skip when a local `.env` is present), Ruff reports zero lint
-issues, and every tracked file is already formatted.
+---
 
-![Tests passed](docs/assets/tests_passed.png)
+**Real provider demo.** Same motion with `--no-fake`; the session header shows
+**mode: real LLM + real search**. The Judge returns a live verdict (Pro 42–40) with
+LLM-generated rationale and three evidence-based reasons, and the transcript is
+written to `runs/<timestamp>/run.jsonl`.
+<p><img src="docs/assets/real_provider_demo.png" alt="Real provider demo" width="100%"></p>
 
-### Real provider demo
+---
 
-Same motion with `--no-fake`; the session header shows **mode: real LLM + real
-search**. The Judge returns a live verdict (Pro 42–40) with LLM-generated
-rationale and three evidence-based reasons, and the transcript is written to
-`runs/<timestamp>/run.jsonl`.
-
-![Real provider demo](docs/assets/real_provider_demo.png)
-
-### Replay demo
-
-`--replay runs/<timestamp>/run.jsonl` re-prints the saved Judge event stream
-turn-by-turn without new LLM or search API calls. The replay summary counts 37
-records and reproduces the original winner (Pro 42–40), reason count, and
+**Replay demo.** `--replay runs/<timestamp>/run.jsonl` re-prints the saved Judge
+event stream turn-by-turn without new LLM or search API calls. The replay summary
+counts 37 records and reproduces the original winner (Pro 42–40), reason count, and
 `source=llm`.
+<p><img src="docs/assets/replay_demo.png" alt="Replay demo" width="100%"></p>
 
-![Replay demo](docs/assets/replay_demo.png)
+---
 
-### Search tool evidence
+**Search tool evidence.** Excerpt from a real run's JSONL transcript: the Judge
+forwards a Pro `search` tool call, then emits `tool_result_sent` with Tavily hits
+— titles, URLs (including `.edu` sources), and snippet text. Confirms agents invoke
+search through the Judge broker, not by calling external APIs directly.
+<p><img src="docs/assets/search_tool_evidence.png" alt="Search tool evidence" width="100%"></p>
 
-Excerpt from a real run's JSONL transcript: the Judge forwards a Pro `search`
-tool call, then emits `tool_result_sent` with Tavily hits — titles, URLs (including
-`.edu` sources), and snippet text. Confirms agents invoke search through the Judge
-broker, not by calling external APIs directly.
+---
 
-![Search tool evidence](docs/assets/search_tool_evidence.png)
+**Agent dialogue with opponent context.** Readable `--print-transcript` output from
+a 10-round debate on mandatory AI content labeling. Shows opening, argument, and
+rebuttal phases for Pro and Con; a Con search call with three cited URLs; and a Pro
+rebuttal that quotes and counters the opponent's prior turn.
+<p><img src="docs/assets/agent_dialogue_example.png" alt="Agent dialogue example" width="100%"></p>
 
-### Agent dialogue with opponent context
+---
 
-Readable `--print-transcript` output from a 10-round debate on mandatory AI
-content labeling. Shows opening, argument, and rebuttal phases for Pro and Con; a
-Con search call with three cited URLs; and a Pro rebuttal that quotes and counters
-the opponent's prior turn — evidence that each side responds to the other, not in
-isolation.
+**Judge verdict.** Structured **Judge verdict** footer from a live run: winner
+**Pro** (130 vs 120), three bullet reasons tied to rebuttals and cited evidence,
+and a one-line rationale summarizing why Pro carried the motion on mandatory labeling.
+<p><img src="docs/assets/judge_verdict_reasons.png" alt="Judge verdict reasons" width="100%"></p>
 
-![Agent dialogue example](docs/assets/agent_dialogue_example.png)
+---
 
-### Judge verdict
+**Gatekeeper ledger.** Post-run **Gatekeeper ledger** from the same session: 3 LLM
+requests, 581 input / 103 output tokens (684 total), and an estimated cost of
+~$0.01 USD. Token use and spend are visible per run instead of hidden behind the
+agents.
+<p><img src="docs/assets/gatekeeper_ledger.png" alt="Gatekeeper ledger" width="100%"></p>
 
-Structured **Judge verdict** footer from a live run: winner **Pro** (130 vs 120),
-three bullet reasons tied to rebuttals and cited evidence, and a one-line rationale
-summarizing why Pro carried the motion on mandatory labeling.
+---
 
-![Judge verdict reasons](docs/assets/judge_verdict_reasons.png)
+**Pro and Con can both win.** The Judge is not hardcoded to either side — different
+runs can produce Pro or Con as the winner depending on argument quality, rebuttals,
+evidence, and cumulative scores.
 
-### Gatekeeper ledger
-
-Post-run **Gatekeeper ledger** from the same session: 3 LLM requests, 581 input /
-103 output tokens (684 total), and an estimated cost of ~$0.01 USD. Token use and
-spend are visible per run instead of hidden behind the agents.
-
-![Gatekeeper ledger](docs/assets/gatekeeper_ledger.png)
-
-### Pro and Con can both win
-
-The Judge is not hardcoded to either side — different runs can produce Pro or Con
-as the winner depending on argument quality, rebuttals, evidence, and cumulative
-scores.
-
-**Pro wins (130–120)** on mandatory AI labeling: three judge reasons and a
-rationale citing stronger evidence and counter-rebuttals.
-
-![Pro wins verdict](docs/assets/pro_wins_verdict.png)
+**Pro wins (130–120)** on mandatory AI labeling: three judge reasons and a rationale
+citing stronger evidence and counter-rebuttals.
+<p><img src="docs/assets/pro_wins_verdict.png" alt="Pro wins verdict" width="100%"></p>
 
 **Con wins (97–96)** after the closing round: Con's final speech followed by the
 Judge verdict block.
+<p><img src="docs/assets/con_wins_verdict.png" alt="Con wins verdict" width="100%"></p>
 
-![Con wins verdict](docs/assets/con_wins_verdict.png)
+---
 
 ## Readable session transcript (example run)
 
@@ -233,6 +223,23 @@ real mode, or **FakeSearchClient** offline.
 | **Gatekeeper** | `debate.shared.gatekeeper` | Budget gate + ledger (tokens, USD, RPM). |
 | **ToolRouter** | `debate.shared.router` | Dispatches `search` through one controlled surface with LRU cache. |
 | **RunLogger** | `debate.shared.logger` | Structured JSONL transcript with redaction. |
+| **SDK** | `debate.sdk` | Public protocol surface: JSONL `Message` / `Verdict` schemas, `LLMClient` and `SearchClient` interfaces, plus fake and real provider implementations. |
+
+### SDK layer (`debate.sdk`)
+
+The project includes a dedicated SDK package under `src/debate/sdk/` — not an
+external third-party SDK, but the **internal provider + schema layer** used across
+agents, orchestration, and tests:
+
+- **`schemas.py`** — `Message`, `Verdict`, `Role`, `Phase`, `MessageType` (JSONL wire format)
+- **`llm_client.py`** — `LLMClient` ABC + `FakeLLMClient`
+- **`search_client.py`** — `SearchClient` ABC + `FakeSearchClient`
+- **`real_llm_client.py`** — `RealLLMClient` (OpenAI-compatible HTTP)
+- **`real_search_client.py`** — `RealSearchClient` (Tavily HTTP)
+
+Judge, Supervisor, Gatekeeper, ToolRouter, and Debater agents all import from
+`debate.sdk`. CLI provider selection is wired through `debate.provider_factory`.
+Import the public surface via `from debate.sdk import Message, Verdict, FakeLLMClient, RealSearchClient, ...`.
 
 ### Verdict rules
 
@@ -302,7 +309,7 @@ The system is designed to be extended:
 - **ToolRouter** dispatches tools through one controlled surface — new skills can
   be added without giving child agents direct API access.
 - **Search path:** Debater → Judge → ToolRouter → Gatekeeper → search client
-- **Replaceable providers:**
+- **Replaceable providers** (all in `debate.sdk`):
   - `FakeSearchClient` — offline tests
   - `RealSearchClient` / Tavily — real search
   - `FakeLLMClient` — deterministic tests
@@ -365,7 +372,11 @@ HW2_AI_Agent_Debate/
 │   ├── session_demo.md       # readable real-provider session example
 │   └── assets/                 # submission screenshots
 ├── runs/.gitkeep               # contents ignored
-├── src/debate/                 # package source
+├── src/debate/
+│   ├── agents/                 # Pro / Con child agents
+│   ├── orchestration/          # Judge, Supervisor, Watchdog
+│   ├── sdk/                    # schemas + LLM/search client SDK
+│   └── shared/                 # Gatekeeper, Router, logger
 └── tests/                      # unit + integration
 ```
 
