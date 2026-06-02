@@ -72,16 +72,6 @@ check .`, and `uv run ruff format --check .`. The full offline suite passes (640
 tests; one expected skip when a local `.env` is present), Ruff reports zero lint
 issues, and every tracked file is already formatted.
 
-### Fake / offline demo
-
-![Fake demo](docs/assets/fake_demo.png)
-
-Two-round run on "Is AI good for education?" with `--fake` — no API keys or
-network calls. The CLI prints the motion, run directory, and a **Final verdict**
-(Pro 50–40) whose rationale is explicitly tagged as a demo verdict from
-`FakeLLMClient`. Useful for deterministic tests and grading only; **not** proof of
-real LLM or search behavior.
-
 ### Real provider demo
 
 ![Real provider demo](docs/assets/real_provider_demo.png)
@@ -319,11 +309,11 @@ The system is designed to be extended:
 | API keys | Not required | Required in local `.env` |
 | Purpose | Tests, deterministic grading | Live demo / assignment proof |
 
-Fake mode is provided so the project can be tested deterministically without
-API keys or network access. **Fake screenshots are not proof of real LLM/search
-usage.** The real-provider behavior is demonstrated separately with `--no-fake`,
-which uses an OpenAI-compatible LLM and Tavily-backed search through environment
-variables.
+Fake mode is provided only for deterministic offline testing and grading without
+API keys. It is not used as proof of real LLM or real search behavior.
+
+The real-provider behavior is demonstrated separately with `--no-fake`, which uses
+an OpenAI-compatible LLM and Tavily-backed search through environment variables.
 
 ```bash
 # Real provider (requires keys in local .env)
