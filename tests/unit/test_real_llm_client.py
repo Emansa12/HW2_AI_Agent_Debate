@@ -16,6 +16,7 @@ import httpx
 import pytest
 
 from debate.sdk.llm_client import LLMClient, LLMResponse
+from debate.sdk.llm_response_parser import _parse_chat_completion
 from debate.sdk.real_llm_client import (
     DEFAULT_BASE_URL,
     DEFAULT_MODEL,
@@ -24,7 +25,6 @@ from debate.sdk.real_llm_client import (
     LLMProviderUnavailableError,
     MissingLLMAPIKeyError,
     RealLLMClient,
-    _parse_chat_completion,
 )
 
 

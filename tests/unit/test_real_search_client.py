@@ -32,9 +32,9 @@ from debate.sdk.real_search_client import (
     SearchProviderError,
     SearchProviderResponseError,
     SearchProviderUnavailableError,
-    _parse_tavily_payload,
 )
 from debate.sdk.search_client import SearchClient, SearchResponse
+from debate.sdk.search_response_parser import _parse_tavily_payload
 
 # ---------------------------------------------------------------------------
 # Helpers

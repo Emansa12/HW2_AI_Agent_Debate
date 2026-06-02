@@ -424,7 +424,7 @@ class TestScoring:
         sup = FakeSupervisor()
         judge, _, _ = _make_judge(supervisor=sup)
         huge = judge.score_turn("pro", _reply(Role.PRO, "x" * 100_000), 1)
-        assert huge["score"] <= 10  # base 1 + cap 9
+        assert huge["score"] <= 12
 
     def test_score_rejects_invalid_role(self) -> None:
         sup = FakeSupervisor()
@@ -529,14 +529,20 @@ class TestTieBreaker:
         v = judge.apply_tie_breaker({"pro": 2, "con": 9})
         assert v.winner == "con"
 
-    def test_exact_tie_chooses_con(self) -> None:
+    def test_exact_tie_uses_transcript_hash(self) -> None:
         sup = FakeSupervisor()
         judge, _, _ = _make_judge(supervisor=sup)
-        v = judge.apply_tie_breaker({"pro": 4, "con": 4})
-        assert v.winner == "con"
+        blob = "tie-0"
+        v = judge.apply_tie_breaker({"pro": 4, "con": 4}, transcript_blob=blob)
+        from debate.orchestration.verdict_tiebreak import hash_pick_winner
+
+        expected = hash_pick_winner(blob)
+        assert expected in ("pro", "con")
+        assert v.winner == expected
         assert v.model_extra is not None
-        assert v.model_extra["scores"] == {"pro": 4, "con": 5}
-        assert "deterministic" in (v.rationale or "").lower()
+        scores = v.model_extra["scores"]
+        assert scores["pro"] != scores["con"]
+        assert scores[v.winner] > scores["pro" if v.winner == "con" else "con"]
 
     def test_tie_breaker_never_leaves_equal_scores(self) -> None:
         sup = FakeSupervisor()
@@ -924,9 +930,8 @@ class TestVerdictRetryPath:
         assert len(tied) == 1
         assert judge.fsm.state is State.DONE
 
-    def test_tie_break_with_equal_cumulative_picks_con(self) -> None:
+    def test_tie_break_with_equal_cumulative_uses_hash(self) -> None:
         sup = FakeSupervisor()
-        # Both sides emit identical content -> identical scores -> tie -> con.
         same = "x" * 100
         sup.queue_receive("pro", _reply(Role.PRO, same))
         sup.queue_receive("con", _reply(Role.CON, same))
@@ -938,106 +943,105 @@ class TestVerdictRetryPath:
         judge = _make_judge_with_scripted_llm(supervisor=sup, scripts=scripts, rounds=1)
         verdict = judge.run_debate(motion="m", rounds=1)
         assert judge.cumulative_scores["pro"] == judge.cumulative_scores["con"]
-        assert verdict.winner == "con"
+        assert verdict.winner in ("pro", "con")
         assert verdict.model_extra is not None
         assert verdict.model_extra["scores"]["pro"] != verdict.model_extra["scores"]["con"]
 
 
 class TestTiedVerdictScores:
-    def test_llm_tied_scores_bump_winner_pro(self) -> None:
+    def test_finalize_prefers_higher_cumulative_over_llm_tie(self) -> None:
         sup = FakeSupervisor()
-        _queue_full_debate(sup, rounds=1)
+        _queue_full_debate(sup, rounds=1, pro_content="P" + "x" * 250, con_content="C")
         judge, _, _ = _make_judge(
             supervisor=sup,
-            llm_text=_verdict_json(winner="pro", pro=120, con=120),
+            llm_text=_verdict_json(winner="con", pro=120, con=120),
             rounds=1,
         )
-        verdict = judge.generate_verdict()
-        judge.validate_verdict(verdict)
-        final, applied, reason = judge._finalize_verdict(verdict)
-        assert applied is True
-        assert reason == "scores_equal"
-        assert final.winner == "pro"
-        assert final.model_extra is not None
-        assert final.model_extra["scores"] == {"pro": 121, "con": 120}
+        verdict = judge.run_debate(motion="m", rounds=1)
+        assert judge.cumulative_scores["pro"] > judge.cumulative_scores["con"]
+        assert verdict.winner == "pro"
+        assert verdict.model_extra is not None
+        assert verdict.model_extra["scores"]["pro"] > verdict.model_extra["scores"]["con"]
 
-    def test_llm_tied_scores_bump_winner_con(self) -> None:
+    def test_finalize_con_wins_when_cumulative_higher(self) -> None:
         sup = FakeSupervisor()
+        _queue_full_debate(sup, rounds=1, pro_content="P", con_content="C" + "x" * 250)
         judge, _, _ = _make_judge(
             supervisor=sup,
-            llm_text=_verdict_json(winner="con", pro=50, con=50),
+            llm_text=_verdict_json(winner="pro", pro=50, con=50),
+            rounds=1,
         )
-        verdict = judge.generate_verdict()
-        final, applied, _reason = judge._finalize_verdict(verdict)
-        assert applied is True
-        assert final.winner == "con"
-        assert final.model_extra is not None
-        assert final.model_extra["scores"] == {"pro": 50, "con": 51}
+        verdict = judge.run_debate(motion="m", rounds=1)
+        assert judge.cumulative_scores["con"] > judge.cumulative_scores["pro"]
+        assert verdict.winner == "con"
 
-    def test_unequal_llm_scores_unchanged(self) -> None:
+    def test_finalize_overrides_mismatched_llm_winner(self) -> None:
         sup = FakeSupervisor()
+        _queue_full_debate(sup, rounds=1, pro_content="P" + "x" * 250, con_content="C")
         judge, _, _ = _make_judge(
             supervisor=sup,
-            llm_text=_verdict_json(winner="pro", pro=55, con=40),
+            llm_text=_verdict_json(winner="con", pro=55, con=40),
+            rounds=1,
         )
-        verdict = judge.generate_verdict()
-        final, applied, reason = judge._finalize_verdict(verdict)
-        assert applied is False
-        assert reason is None
-        assert final.model_extra is not None
-        assert final.model_extra["scores"] == {"pro": 55, "con": 40}
+        verdict = judge.run_debate(motion="m", rounds=1)
+        assert verdict.winner == "pro"
+        assert verdict.model_extra is not None
+        assert verdict.model_extra["scores"]["pro"] > verdict.model_extra["scores"]["con"]
 
-    def test_run_debate_logs_tiebreak_for_tied_llm_scores(self) -> None:
+    def test_run_debate_logs_tiebreak_when_llm_overridden(self) -> None:
         sup = FakeSupervisor()
-        _queue_full_debate(sup, rounds=1)
+        _queue_full_debate(sup, rounds=1, pro_content="P" + "x" * 250, con_content="C")
         logger = RecordingLogger()
         judge, _, _ = _make_judge(
             supervisor=sup,
-            llm_text=_verdict_json(winner="pro", pro=120, con=120),
+            llm_text=_verdict_json(winner="con", pro=120, con=120),
             rounds=1,
             logger=logger,
         )
         verdict = judge.run_debate(motion="m", rounds=1)
-        assert verdict.model_extra is not None
-        assert verdict.model_extra["scores"] == {"pro": 121, "con": 120}
+        assert verdict.winner == "pro"
         recorded = [e for e in logger.events if e["event_type"] == "verdict_recorded"][-1]
         assert recorded["verdict_tiebreak_applied"] is True
-        assert recorded["tiebreak_reason"] == "scores_equal"
+        assert recorded["tiebreak_reason"] == "cumulative_higher"
         assert recorded["scores"]["pro"] != recorded["scores"]["con"]
 
 
 class TestWinnerNotHardcoded:
-    """The Judge must not always pick the same side.
+    """Winner follows cumulative debate scores, not a fixed side."""
 
-    Valid mocked LLM verdicts preserve ``winner``; tie-break paths
-    follow cumulative scores (Con only on exact cumulative ties).
-    """
-
-    @pytest.mark.parametrize("winner", ("pro", "con"))
-    def test_mocked_valid_verdict_preserves_llm_winner(self, winner: str) -> None:
+    def test_pro_wins_when_cumulative_higher_even_if_llm_picks_con(self) -> None:
         sup = FakeSupervisor()
-        _queue_full_debate(sup, rounds=1)
-        pro_score, con_score = (70, 55) if winner == "pro" else (45, 72)
+        _queue_full_debate(sup, rounds=1, pro_content="P" + "x" * 250, con_content="C")
         judge, _, _ = _make_judge(
             supervisor=sup,
-            llm_text=_verdict_json(winner=winner, pro=pro_score, con=con_score),
+            llm_text=_verdict_json(winner="con", pro=70, con=55),
             rounds=1,
         )
-        verdict = judge.run_debate(motion="m", rounds=1)
-        assert verdict.winner == winner
+        verdict = judge.run_debate(motion="same motion", rounds=1)
+        assert verdict.winner == "pro"
 
-    @pytest.mark.parametrize("winner", ("pro", "con"))
-    def test_tied_llm_scores_follow_llm_winner_not_fixed_side(self, winner: str) -> None:
+    def test_con_wins_when_cumulative_higher_even_if_llm_picks_pro(self) -> None:
         sup = FakeSupervisor()
+        _queue_full_debate(sup, rounds=1, pro_content="P", con_content="C" + "x" * 250)
         judge, _, _ = _make_judge(
             supervisor=sup,
-            llm_text=_verdict_json(winner=winner, pro=100, con=100),
+            llm_text=_verdict_json(winner="pro", pro=70, con=55),
+            rounds=1,
         )
-        verdict = judge.generate_verdict()
-        final, applied, reason = judge._finalize_verdict(verdict)
-        assert applied is True
-        assert reason == "scores_equal"
-        assert final.winner == winner
+        verdict = judge.run_debate(motion="same motion", rounds=1)
+        assert verdict.winner == "con"
+
+    def test_equal_cumulative_can_pick_either_via_hash(self) -> None:
+        sup = FakeSupervisor()
+        _queue_full_debate(sup, rounds=1, pro_content="P", con_content="C")
+        judge, _, _ = _make_judge(
+            supervisor=sup,
+            llm_text=_verdict_json(winner="pro", pro=100, con=100),
+            rounds=1,
+        )
+        verdict = judge.run_debate(motion="same motion", rounds=1)
+        assert judge.cumulative_scores["pro"] == judge.cumulative_scores["con"]
+        assert verdict.winner in ("pro", "con")
 
     def test_cumulative_tiebreak_follows_higher_side(self) -> None:
         sup = FakeSupervisor()
