@@ -534,7 +534,18 @@ class TestTieBreaker:
         judge, _, _ = _make_judge(supervisor=sup)
         v = judge.apply_tie_breaker({"pro": 4, "con": 4})
         assert v.winner == "con"
+        assert v.model_extra is not None
+        assert v.model_extra["scores"] == {"pro": 4, "con": 5}
         assert "deterministic" in (v.rationale or "").lower()
+
+    def test_tie_breaker_never_leaves_equal_scores(self) -> None:
+        sup = FakeSupervisor()
+        judge, _, _ = _make_judge(supervisor=sup)
+        for pro, con in ((4, 4), (10, 10), (0, 0)):
+            v = judge.apply_tie_breaker({"pro": pro, "con": con})
+            scores = v.model_extra["scores"]
+            assert scores["pro"] != scores["con"]
+            assert v.winner in ("pro", "con")
 
     def test_tie_breaker_passes_validation(self) -> None:
         sup = FakeSupervisor()
@@ -753,6 +764,54 @@ class TestRunDebate:
         assert "tool_call_received" in types
         assert "tool_result_sent" in types
 
+    def test_logs_include_readable_prompt_and_reply_content(self) -> None:
+        sup = FakeSupervisor()
+        _queue_full_debate(sup, rounds=1, pro_content="PRO_TEXT", con_content="CON_TEXT")
+        logger = RecordingLogger()
+        judge, _, _ = _make_judge(supervisor=sup, logger=logger)
+        judge.run_debate(motion="motion topic", rounds=1)
+
+        prompts = [e for e in logger.events if e["event_type"] == "prompt_sent"]
+        replies = [e for e in logger.events if e["event_type"] == "reply_received"]
+        assert prompts and replies
+        assert isinstance(prompts[0]["prompt_text"], str)
+        assert "phase" in prompts[0]["prompt_payload"]
+        assert "PRO_TEXT" in replies[0]["content"]
+        assert replies[0]["content_length"] == len(replies[0]["content"])
+
+        verdict = [e for e in logger.events if e["event_type"] == "verdict_recorded"][-1]
+        assert verdict["winner"] in ("pro", "con")
+        assert isinstance(verdict.get("reasons"), list) and len(verdict["reasons"]) >= 3
+        assert isinstance(verdict.get("verdict_text"), str)
+
+    def test_logs_redact_sensitive_tool_payload_keys(self) -> None:
+        sup = FakeSupervisor()
+        sup.queue_receive("pro", _reply(Role.PRO, "P open"))
+        sup.queue_receive("con", _reply(Role.CON, "C open"))
+        sup.queue_receive(
+            "pro",
+            Message(
+                v=SCHEMA_VERSION,
+                ts=1.0,
+                turn_id=0,
+                role=Role.PRO,
+                type=MessageType.TOOL_CALL,
+                payload={"tool": "search", "query": "x", "client_api_key": "sk-leak-test"},
+            ),
+        )
+        sup.queue_receive("pro", _reply(Role.PRO, "P arg"))
+        sup.queue_receive("con", _reply(Role.CON, "C arg"))
+        sup.queue_receive("pro", _reply(Role.PRO, "P close"))
+        sup.queue_receive("con", _reply(Role.CON, "C close"))
+        logger = RecordingLogger()
+        judge, _, _ = _make_judge(supervisor=sup, logger=logger)
+        judge.run_debate(motion="m", rounds=1)
+        tool_calls = [e for e in logger.events if e["event_type"] == "tool_call_received"]
+        assert tool_calls
+        payload = tool_calls[0]["tool_call_payload"]
+        assert payload["client_api_key"] == "<redacted>"
+        assert "sk-leak-test" not in str(tool_calls)
+
     def test_terminate_all_on_success(self) -> None:
         sup = FakeSupervisor()
         _queue_full_debate(sup, rounds=1)
@@ -880,6 +939,130 @@ class TestVerdictRetryPath:
         verdict = judge.run_debate(motion="m", rounds=1)
         assert judge.cumulative_scores["pro"] == judge.cumulative_scores["con"]
         assert verdict.winner == "con"
+        assert verdict.model_extra is not None
+        assert verdict.model_extra["scores"]["pro"] != verdict.model_extra["scores"]["con"]
+
+
+class TestTiedVerdictScores:
+    def test_llm_tied_scores_bump_winner_pro(self) -> None:
+        sup = FakeSupervisor()
+        _queue_full_debate(sup, rounds=1)
+        judge, _, _ = _make_judge(
+            supervisor=sup,
+            llm_text=_verdict_json(winner="pro", pro=120, con=120),
+            rounds=1,
+        )
+        verdict = judge.generate_verdict()
+        judge.validate_verdict(verdict)
+        final, applied, reason = judge._finalize_verdict(verdict)
+        assert applied is True
+        assert reason == "scores_equal"
+        assert final.winner == "pro"
+        assert final.model_extra is not None
+        assert final.model_extra["scores"] == {"pro": 121, "con": 120}
+
+    def test_llm_tied_scores_bump_winner_con(self) -> None:
+        sup = FakeSupervisor()
+        judge, _, _ = _make_judge(
+            supervisor=sup,
+            llm_text=_verdict_json(winner="con", pro=50, con=50),
+        )
+        verdict = judge.generate_verdict()
+        final, applied, _reason = judge._finalize_verdict(verdict)
+        assert applied is True
+        assert final.winner == "con"
+        assert final.model_extra is not None
+        assert final.model_extra["scores"] == {"pro": 50, "con": 51}
+
+    def test_unequal_llm_scores_unchanged(self) -> None:
+        sup = FakeSupervisor()
+        judge, _, _ = _make_judge(
+            supervisor=sup,
+            llm_text=_verdict_json(winner="pro", pro=55, con=40),
+        )
+        verdict = judge.generate_verdict()
+        final, applied, reason = judge._finalize_verdict(verdict)
+        assert applied is False
+        assert reason is None
+        assert final.model_extra is not None
+        assert final.model_extra["scores"] == {"pro": 55, "con": 40}
+
+    def test_run_debate_logs_tiebreak_for_tied_llm_scores(self) -> None:
+        sup = FakeSupervisor()
+        _queue_full_debate(sup, rounds=1)
+        logger = RecordingLogger()
+        judge, _, _ = _make_judge(
+            supervisor=sup,
+            llm_text=_verdict_json(winner="pro", pro=120, con=120),
+            rounds=1,
+            logger=logger,
+        )
+        verdict = judge.run_debate(motion="m", rounds=1)
+        assert verdict.model_extra is not None
+        assert verdict.model_extra["scores"] == {"pro": 121, "con": 120}
+        recorded = [e for e in logger.events if e["event_type"] == "verdict_recorded"][-1]
+        assert recorded["verdict_tiebreak_applied"] is True
+        assert recorded["tiebreak_reason"] == "scores_equal"
+        assert recorded["scores"]["pro"] != recorded["scores"]["con"]
+
+
+class TestWinnerNotHardcoded:
+    """The Judge must not always pick the same side.
+
+    Valid mocked LLM verdicts preserve ``winner``; tie-break paths
+    follow cumulative scores (Con only on exact cumulative ties).
+    """
+
+    @pytest.mark.parametrize("winner", ("pro", "con"))
+    def test_mocked_valid_verdict_preserves_llm_winner(self, winner: str) -> None:
+        sup = FakeSupervisor()
+        _queue_full_debate(sup, rounds=1)
+        pro_score, con_score = (70, 55) if winner == "pro" else (45, 72)
+        judge, _, _ = _make_judge(
+            supervisor=sup,
+            llm_text=_verdict_json(winner=winner, pro=pro_score, con=con_score),
+            rounds=1,
+        )
+        verdict = judge.run_debate(motion="m", rounds=1)
+        assert verdict.winner == winner
+
+    @pytest.mark.parametrize("winner", ("pro", "con"))
+    def test_tied_llm_scores_follow_llm_winner_not_fixed_side(self, winner: str) -> None:
+        sup = FakeSupervisor()
+        judge, _, _ = _make_judge(
+            supervisor=sup,
+            llm_text=_verdict_json(winner=winner, pro=100, con=100),
+        )
+        verdict = judge.generate_verdict()
+        final, applied, reason = judge._finalize_verdict(verdict)
+        assert applied is True
+        assert reason == "scores_equal"
+        assert final.winner == winner
+
+    def test_cumulative_tiebreak_follows_higher_side(self) -> None:
+        sup = FakeSupervisor()
+        judge, _, _ = _make_judge(supervisor=sup)
+        assert judge.apply_tie_breaker({"pro": 3, "con": 7}).winner == "con"
+        assert judge.apply_tie_breaker({"pro": 9, "con": 2}).winner == "pro"
+
+    def test_verdict_recorded_fields_include_winner_scores_reasons(self) -> None:
+        sup = FakeSupervisor()
+        _queue_full_debate(sup, rounds=1)
+        logger = RecordingLogger()
+        judge, _, _ = _make_judge(
+            supervisor=sup,
+            llm_text=_verdict_json(winner="con", pro=40, con=60),
+            rounds=1,
+            logger=logger,
+        )
+        judge.run_debate(motion="m", rounds=1)
+        recorded = [e for e in logger.events if e["event_type"] == "verdict_recorded"][-1]
+        assert recorded["winner"] == "con"
+        assert recorded["winner"] != "tie"
+        assert isinstance(recorded.get("scores"), dict)
+        assert recorded["scores"]["pro"] != recorded["scores"]["con"]
+        assert isinstance(recorded.get("reasons"), list) and len(recorded["reasons"]) >= 3
+        assert isinstance(recorded.get("rationale"), str)
 
 
 # ---------------------------------------------------------------------------

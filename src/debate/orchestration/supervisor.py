@@ -129,6 +129,9 @@ _DEFAULT_CHILD_ENV_ALLOWLIST: frozenset[str] = frozenset(
         # FakeLLMClient for RealLLMClient. Set to "1" by the parent
         # CLI when ``--real-llm`` is passed.
         "DEBATE_REAL_LLM",
+        # When "1", debaters emit a search tool_call on opening /
+        # first argument (parent still brokers search via ToolRouter).
+        "DEBATE_REAL_SEARCH",
         # Debate-config-relevant passthroughs.
         "DEBATE_ROUNDS",
         "DEBATE_MAX_TOKENS",

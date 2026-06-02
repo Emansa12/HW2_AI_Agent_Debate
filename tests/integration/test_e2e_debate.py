@@ -136,6 +136,71 @@ class TestEndToEnd:
             "verdict generation alone must consume at least one LLM request"
         )
 
+    def test_transcript_includes_readable_debate_text(self, tmp_path: Path) -> None:
+        rc, _stdout, runs_root = _run(tmp_path)
+        assert rc == 0
+        records = _read_jsonl(_find_run_dir(runs_root) / "run.jsonl")
+
+        prompts = [r for r in records if r["event_type"] == "prompt_sent"]
+        replies = [r for r in records if r["event_type"] == "reply_received"]
+        assert prompts, "expected at least one prompt_sent record"
+        assert replies, "expected at least one reply_received record"
+
+        for rec in prompts:
+            assert isinstance(rec.get("prompt_text"), str) and rec["prompt_text"].strip()
+            assert isinstance(rec.get("prompt_payload"), dict)
+            assert rec.get("prompt_length", 0) >= len(rec["prompt_text"])
+
+        for rec in replies:
+            content = rec.get("content")
+            assert isinstance(content, str) and content.strip()
+            assert rec.get("content_length") == len(content)
+
+        verdicts = [r for r in records if r["event_type"] == "verdict_recorded"]
+        assert verdicts, "expected verdict_recorded"
+        last = verdicts[-1]
+        assert last["winner"] in ("pro", "con")
+        assert isinstance(last.get("scores"), dict)
+        scores = last["scores"]
+        assert scores.get("pro") != scores.get("con"), (
+            "verdict_recorded must not contain tied pro/con scores"
+        )
+        assert isinstance(last.get("reasons"), list) and len(last["reasons"]) >= 3
+        assert isinstance(last.get("verdict_text"), str) and last["verdict_text"].strip()
+
+        llm_verdict = [r for r in records if r["event_type"] == "verdict_llm_response"]
+        assert llm_verdict, "expected verdict_llm_response"
+        assert isinstance(llm_verdict[-1].get("verdict_text"), str)
+        assert llm_verdict[-1].get("text_length") == len(llm_verdict[-1]["verdict_text"])
+
+    def test_brokered_search_tool_calls_in_fake_mode(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Children emit tool_call when DEBATE_REAL_SEARCH=1; parent still
+        uses FakeSearchClient (no network, no API keys)."""
+        import debate.main as main_module
+
+        original_build = main_module._build_child_env
+
+        def _force_search_env(*, real_llm: bool = False, real_search: bool = False):
+            env = original_build(real_llm=real_llm, real_search=real_search)
+            env["DEBATE_REAL_SEARCH"] = "1"
+            return env
+
+        monkeypatch.setattr(main_module, "_build_child_env", _force_search_env)
+
+        rc, _stdout, runs_root = _run(tmp_path)
+        assert rc == 0
+        records = _read_jsonl(_find_run_dir(runs_root) / "run.jsonl")
+        event_types = {r["event_type"] for r in records}
+        assert "tool_call_received" in event_types
+        assert "tool_result_sent" in event_types
+
+        tool_results = [r for r in records if r["event_type"] == "tool_result_sent"]
+        assert tool_results, "expected tool_result_sent records"
+        payload_text = str(tool_results[0].get("tool_result_payload", {}))
+        assert "https://example.com" in payload_text or "url" in payload_text.lower()
+
     def test_verdict_event_has_pro_or_con_winner(self, tmp_path: Path) -> None:
         rc, _stdout, runs_root = _run(tmp_path)
         assert rc == 0

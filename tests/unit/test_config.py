@@ -30,6 +30,7 @@ def _valid_debate_dict() -> dict[str, Any]:
         "max_message_bytes": 65536,
         "per_turn_timeout_seconds": 30.0,
         "total_timeout_seconds": 300.0,
+        "max_logged_text_chars": 65536,
     }
 
 

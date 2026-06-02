@@ -39,4 +39,6 @@ if __name__ == "__main__":
 
         client = FakeLLMClient()
 
-    raise SystemExit(ConAgent(llm_client=client).run())
+    search_enabled = os.environ.get("DEBATE_REAL_SEARCH") == "1"
+
+    raise SystemExit(ConAgent(llm_client=client, search_enabled=search_enabled).run())

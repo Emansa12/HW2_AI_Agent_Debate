@@ -13,12 +13,12 @@ import pytest
 from debate.agents import (
     BaseAgent,
     ConAgent,
-    DebaterAgent,
     ProAgent,
 )
 from debate.agents import con_agent as con_agent_module
 from debate.agents import debater_agent as debater_agent_module
 from debate.agents import pro_agent as pro_agent_module
+from debate.agents.debater_agent import MAX_REPLY_LINES, DebaterAgent, _truncate_reply_lines
 from debate.orchestration.ipc import deserialize_message, serialize_message
 from debate.sdk.llm_client import FakeLLMClient, LLMResponse
 from debate.sdk.schemas import SCHEMA_VERSION, Message, MessageType, Phase, Role
@@ -204,9 +204,51 @@ class TestBuildPrompt:
 
     def test_omits_optional_sections_when_unset(self) -> None:
         prompt = _pro().build_prompt(Phase.OPENING)
-        assert "Opponent" not in prompt
+        assert "Opponent said:" not in prompt
         assert "Context" not in prompt
-        assert "Tool results" not in prompt
+        assert "Previous tool results" not in prompt
+
+
+class TestConciseReplyRules:
+    def test_prompt_instructs_max_five_lines(self) -> None:
+        prompt = _pro().build_prompt(Phase.OPENING)
+        assert f"at most {MAX_REPLY_LINES} short lines" in prompt
+        assert "Do not write long essays" in prompt
+
+    def test_prompt_instructs_opponent_response_when_opponent_last_set(self) -> None:
+        agent = _con()
+        agent.opponent_last = "Phones help students learn."
+        prompt = agent.build_prompt(Phase.ARGUMENT)
+        assert "Phones help students learn." in prompt
+        assert "Opponent said:" in prompt
+        assert "Directly address opponent_last" in prompt
+        assert "My opponent argued that" in prompt
+
+    def test_opening_prompt_does_not_require_opponent_response(self) -> None:
+        agent = _pro()
+        agent.opponent_last = "SHOULD_NOT_APPEAR"
+        prompt = agent.build_prompt(Phase.OPENING)
+        assert "SHOULD_NOT_APPEAR" not in prompt
+        assert "no opponent reply to address yet" in prompt
+
+    def test_stance_instruction_forbids_full_agreement(self) -> None:
+        pro_prompt = _pro().build_prompt(Phase.OPENING)
+        con_prompt = _con().build_prompt(Phase.OPENING)
+        assert "do not fully agree with Con" in pro_prompt
+        assert "do not fully agree with Pro" in con_prompt
+
+    def test_generate_reply_truncates_to_max_lines(self) -> None:
+        long_text = "\n".join(f"line {i}" for i in range(1, 12))
+        llm = RecordingLLM(text=long_text)
+        agent = _pro(llm_client=llm)
+        reply = agent.generate_reply(Phase.ARGUMENT)
+        content = reply.payload["content"]
+        assert len(content.splitlines()) <= MAX_REPLY_LINES
+
+    def test_truncate_reply_lines_helper(self) -> None:
+        text = "\n".join(f"L{i}" for i in range(10))
+        out = _truncate_reply_lines(text, max_lines=5)
+        assert out.splitlines() == ["L0", "L1", "L2", "L3", "L4"]
 
 
 # ---------------------------------------------------------------------------
@@ -384,14 +426,100 @@ class TestRunLoopIntegration:
         agent = _pro()
         tr = _msg(
             MessageType.TOOL_RESULT,
-            payload={"tool": "search", "results": ["r1", "r2"], "query": "q"},
+            payload={
+                "tool": "search",
+                "results": [
+                    {
+                        "title": "Example",
+                        "url": "https://example.com/a",
+                        "snippet": "snippet text",
+                    }
+                ],
+            },
         )
         agent.handle(tr)
-        assert agent.previous_tool_results == [
-            {"tool": "search", "results": ["r1", "r2"], "query": "q"}
-        ]
+        assert len(agent.previous_tool_results) == 1
         prompt = agent.build_prompt(Phase.ARGUMENT)
-        assert "r1" in prompt or "['r1', 'r2']" in prompt
+        assert "https://example.com/a" in prompt
+        assert "Example" in prompt
+
+    def test_search_disabled_replies_without_tool_call(self) -> None:
+        llm = RecordingLLM(text="direct reply")
+        prompt = _msg(MessageType.PROMPT, payload={"phase": "opening", "round": 0})
+        shutdown = _msg(MessageType.SHUTDOWN)
+        stdout = BytesIO()
+        agent = _pro(
+            llm_client=llm,
+            search_enabled=False,
+            stdin=_enc(prompt, shutdown),
+            stdout=stdout,
+        )
+        agent.run()
+        wire = _out(stdout)
+        assert len(wire) == 1
+        assert wire[0].type is MessageType.REPLY
+        assert wire[0].payload["content"] == "direct reply"
+
+    def test_search_enabled_opening_emits_tool_call_then_reply(self) -> None:
+        llm = RecordingLLM(text="reply after search")
+        opening = _msg(MessageType.PROMPT, payload={"phase": "opening", "round": 0})
+        tool_result = _msg(
+            MessageType.TOOL_RESULT,
+            payload={
+                "tool": "search",
+                "results": [
+                    {
+                        "title": "Hit 1",
+                        "url": "https://example.com/hit",
+                        "snippet": "evidence snippet",
+                    }
+                ],
+            },
+        )
+        shutdown = _msg(MessageType.SHUTDOWN)
+        stdout = BytesIO()
+        agent = _pro(
+            llm_client=llm,
+            motion="AI in education",
+            search_enabled=True,
+            stdin=_enc(opening, tool_result, shutdown),
+            stdout=stdout,
+        )
+        agent.run()
+        wire = _out(stdout)
+        assert len(wire) == 2
+        assert wire[0].type is MessageType.TOOL_CALL
+        assert wire[0].payload["tool"] == "search"
+        assert "AI in education" in wire[0].payload["query"]
+        assert wire[1].type is MessageType.REPLY
+        assert wire[1].payload["content"] == "reply after search"
+        assert "https://example.com/hit" in llm.prompts[0]
+
+    def test_search_only_once_per_debater(self) -> None:
+        llm = RecordingLLM(text="arg reply")
+        opening = _msg(MessageType.PROMPT, payload={"phase": "opening", "round": 0})
+        tool_result = _msg(
+            MessageType.TOOL_RESULT,
+            payload={"tool": "search", "results": []},
+        )
+        argument = _msg(
+            MessageType.PROMPT,
+            payload={"phase": "argument", "round": 0, "opponent_last": "x"},
+        )
+        shutdown = _msg(MessageType.SHUTDOWN)
+        stdout = BytesIO()
+        agent = _pro(
+            llm_client=llm,
+            search_enabled=True,
+            stdin=_enc(opening, tool_result, argument, shutdown),
+            stdout=stdout,
+        )
+        agent.run()
+        wire = _out(stdout)
+        tool_calls = [m for m in wire if m.type is MessageType.TOOL_CALL]
+        replies = [m for m in wire if m.type is MessageType.REPLY]
+        assert len(tool_calls) == 1
+        assert len(replies) == 2
 
     def test_ping_inside_debate_flow_still_yields_pong(self) -> None:
         ping = _msg(MessageType.PING, turn_id=99)

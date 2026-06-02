@@ -41,6 +41,9 @@ uv run python -m debate.main --motion "..." --rounds 2 --fake --real-search
 # Full real-provider mode: real OpenAI-compatible LLM + real search
 uv run python -m debate.main --motion "..." --rounds 2 --no-fake
 
+# Same, with a readable terminal summary after the run
+uv run python -m debate.main --motion "Should schools ban smartphones?" --rounds 2 --no-fake --print-transcript
+
 # Equivalent to --no-fake, but explicit:
 uv run python -m debate.main --motion "..." --rounds 2 --real-llm --real-search
 ```
@@ -48,7 +51,9 @@ uv run python -m debate.main --motion "..." --rounds 2 --real-llm --real-search
 Real modes read keys from the environment only (`LLM_API_KEY` /
 `OPENAI_API_KEY` for the LLM, `SEARCH_API_KEY` /
 `TAVILY_API_KEY` for search). See [Security](#security) below and
-the comments in `.env-example`.
+the comments in `.env-example`. A local `--no-fake` run was
+verified with real LLM + real search using environment variables;
+generated runs and `.env` are not committed.
 
 ## HW2 assignment context
 
@@ -113,7 +118,7 @@ project has the following hard requirements (see
 | Component | Module | Responsibility |
 |-----------|--------|----------------|
 | **Judge** | `debate.orchestration.judge` | Parent / central controller. Spawns children, alternates Pro/Con turns, validates replies, routes tool calls, scores turns, generates the final verdict, applies the deterministic tie-breaker. |
-| **Pro / Con agents** | `debate.agents.{pro,con}_agent` + `debate.agents.debater_agent` | Child subprocesses. Receive `prompt` / `tool_result` / `ping`, reply with `argument` / `tool_call` / `pong`. Stance-only subclass on top of `DebaterAgent`. |
+| **Pro / Con agents** | `debate.agents.{pro,con}_agent` + `debate.agents.debater_agent` | Child subprocesses. Receive `prompt` / `tool_result` / `ping`, reply with `argument` / `tool_call` / `pong`. Stance-only subclass on top of `DebaterAgent`. Each reply is capped at **5 short lines** and must directly address `opponent_last` when the Judge supplies it. |
 | **Supervisor** | `debate.orchestration.supervisor` | Owns the JSONL stdin/stdout pipes for each child. `spawn` / `send` / `receive` / `terminate` / `respawn`. Filters env to a strict allow-list (no `SEARCH_API_KEY` ever). |
 | **State machine** | `debate.orchestration.state_machine` | Pure FSM. Drives the legal sequence of debate states (init -> openings -> rounds -> closings -> verdict). |
 | **Watchdog** | `debate.orchestration.watchdog` | Liveness monitor. Sends `ping`, expects `pong`, calls `on_miss(role)` if the child is unresponsive. Does not own the recovery policy. |
@@ -135,12 +140,27 @@ The Stage 9 verdict pipeline is strict:
    declare a tie), the Judge applies a **deterministic tie-break**:
    the side with the higher cumulative score wins; if cumulative
    scores are exactly equal, **Con** wins.
-4. The final `Verdict` is logged as `verdict_recorded` and
+4. If the LLM returns **equal** `scores.pro` and `scores.con`, the
+   Judge applies the same tie-break rules (prefer the valid
+   `winner` field, else cumulative scores, else Con) and bumps the
+   winner's score by one so the visible verdict never shows a tie
+   (e.g. `pro=120 con=120` with `winner=pro` becomes
+   `pro=121 con=120`). The adjustment is logged as
+   `verdict_tiebreak_applied` / `tiebreak_reason` in `run.jsonl`.
+5. The final `Verdict` is logged as `verdict_recorded` and
    immediately followed by `debate_done`.
 
 The `winner` field is constrained at the schema level
 (`Literal["pro", "con"]`); ties cannot survive even a malicious
 LLM response.
+
+The Judge is **not hardcoded** to favor Pro or Con. The winner is
+produced by the validated LLM verdict pipeline; unit tests mock both
+Pro-winning and Con-winning verdicts, and real-provider demo runs
+can yield different winners depending on motion and argument quality.
+Deterministic tie-break applies only when the LLM verdict is invalid
+or final scores are exactly tied; on cumulative-score ties Con wins
+by the documented fallback rule.
 
 ## Project layout
 
@@ -213,6 +233,12 @@ uv run python -m debate.main --replay runs/<timestamp>/run.jsonl
 uv run python -m debate.main --rounds 2 --quiet
 ```
 
+Debater replies are **concise 5-line turns**: Pro and Con are
+instructed (and post-truncated) to at most five short lines per
+reply. The Judge passes `opponent_last` on argument and closing
+turns so each side must rebut or refine the previous point instead
+of writing unrelated essays.
+
 ### Useful flags
 
 | Flag | Default | Description |
@@ -231,6 +257,7 @@ uv run python -m debate.main --rounds 2 --quiet
 | `--run-id <id>` | UTC timestamp | Force a specific run id |
 | `--replay <path>` | unset | Replay a saved `run.jsonl` and exit |
 | `--quiet` | off | Suppress banner / summary output |
+| `--print-transcript` | off | After a live run, print a readable transcript summary to the terminal (full JSONL still written under `runs/`) |
 | `--version` | - | Print package version |
 
 ### Transcript
@@ -252,6 +279,19 @@ runs/<run_id>/
 `tool_result_sent` (when used), `score_recorded`,
 `verdict_llm_response`, `verdict_recorded`, `debate_done`,
 `cli_finished` (with the gatekeeper ledger snapshot).
+
+Each record is readable, redacted session content: Judge
+`prompt_sent` payloads (`prompt_payload`, `prompt_text`,
+`prompt_length`), Pro/Con `reply_received` bodies with
+`content_length`, verdict fields (`verdict_text`, `winner`,
+`scores`, `reasons`), and `tool_call_received` /
+`tool_result_sent` when search is brokered.
+
+Pass `--print-transcript` after a live run to print a condensed,
+human-readable summary (motion, search calls/results, agent
+replies, verdict, gatekeeper ledger) to the terminal. The full
+artifact remains in `runs/<timestamp>/run.jsonl`; replay mode
+(`--replay`) is unchanged.
 
 Replay mode (`--replay`) reads only this file - it never spawns a
 subprocess and never imports `LLMClient` or `SearchClient`.

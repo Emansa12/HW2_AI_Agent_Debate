@@ -47,6 +47,12 @@ class DebateConfig(BaseModel):
     total_timeout_seconds: Annotated[float, Field(gt=0.0)]
     """Watchdog wall-clock budget for the whole debate."""
 
+    max_logged_text_chars: Annotated[int, Field(ge=256, le=1_000_000)] = 65_536
+    """Maximum characters per string field written into ``run.jsonl``.
+
+    Large enough for graders to read full debate turns; truncates
+    with a ``…[truncated]`` suffix when exceeded."""
+
 
 class Motion(BaseModel):
     """A single debate motion (topic)."""

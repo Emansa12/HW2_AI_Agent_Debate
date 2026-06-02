@@ -51,6 +51,11 @@ class TestParser:
         assert args.runs_root == "runs"
         assert args.run_id is None
         assert args.quiet is False
+        assert args.print_transcript is False
+
+    def test_print_transcript_flag(self) -> None:
+        args = build_parser().parse_args(["--print-transcript"])
+        assert args.print_transcript is True
 
     def test_real_search_flag(self) -> None:
         args = build_parser().parse_args(["--real-search"])
@@ -244,6 +249,12 @@ class TestBuilders:
         assert env.get("DEBATE_REAL_LLM") == "1"
         assert env.get("OPENAI_API_KEY") == "sk-fake-test"
         assert env.get("OPENAI_MODEL") == "gpt-4o-mini"
+
+    def test_build_child_env_real_search_sets_flag(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        env = _build_child_env(real_search=True)
+        assert env.get("DEBATE_REAL_SEARCH") == "1"
+        assert "SEARCH_API_KEY" not in env
+        assert "TAVILY_API_KEY" not in env
 
     def test_build_child_env_fake_mode_does_not_set_real_llm_flag(
         self, monkeypatch: pytest.MonkeyPatch
@@ -498,5 +509,50 @@ class TestNamespaceShape:
             "run_id",
             "replay",
             "quiet",
+            "print_transcript",
         ):
             assert hasattr(ns, attr), f"namespace is missing {attr!r}"
+
+    def test_main_live_run_with_print_transcript(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        out = io.StringIO()
+        rc = main(
+            [
+                "--motion",
+                "Should schools ban smartphones?",
+                "--rounds",
+                "1",
+                "--fake",
+                "--quiet",
+                "--print-transcript",
+                "--runs-root",
+                str(tmp_path / "runs"),
+            ],
+            out=out,
+        )
+        assert rc == 0
+        text = out.getvalue()
+        assert "Debate transcript summary" in text
+        assert "Should schools ban smartphones?" in text
+        assert "ANSWER FROM pro" in text
+        assert "ANSWER FROM con" in text
+        assert "--- Judge verdict ---" in text
+        assert "winner:" in text
+
+    def test_main_replay_ignores_print_transcript(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        p = tmp_path / "r.jsonl"
+        _write_transcript(
+            p, [{"ts": 1.0, "role": "judge", "turn_id": 0, "event_type": "debate_done"}]
+        )
+        out = io.StringIO()
+        rc = main(["--replay", str(p), "--print-transcript"], out=out)
+        assert rc == 0
+        text = out.getvalue()
+        assert "Replay" in text
+        assert "Debate transcript summary" not in text

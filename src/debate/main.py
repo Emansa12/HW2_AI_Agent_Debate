@@ -57,6 +57,8 @@ from debate.shared.config import DebateConfig, load_debate_config, load_motions
 from debate.shared.gatekeeper import Gatekeeper, GatekeeperPolicy
 from debate.shared.logger import RunLogger
 from debate.shared.router import ToolRouter
+from debate.shared.secrets import maybe_load_dotenv
+from debate.shared.transcript_log import print_readable_transcript
 
 DEFAULT_MOTION: str = "AI-generated content should require mandatory labeling."
 """Used when neither ``--motion`` nor a non-empty ``config/motions.json``
@@ -196,6 +198,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=False,
         help="Suppress per-event progress output (the JSONL transcript is still written).",
+    )
+    parser.add_argument(
+        "--print-transcript",
+        action="store_true",
+        default=False,
+        help="After a live run, print a readable transcript summary from run.jsonl.",
     )
     parser.add_argument(
         "--version",
@@ -521,7 +529,7 @@ def run_live(args: argparse.Namespace, out: Any) -> int:
         out.write(f"error: {type(exc).__name__}: {exc}\n")
         return 1
 
-    child_env = _build_child_env(real_llm=real_llm)
+    child_env = _build_child_env(real_llm=real_llm, real_search=real_search)
 
     with Supervisor(
         runs_dir=run_dir,
@@ -538,6 +546,7 @@ def run_live(args: argparse.Namespace, out: Any) -> int:
             motion=motion,
             max_tokens_per_turn=cfg.token_limit_per_turn,
             per_turn_timeout_sec=cfg.per_turn_timeout_seconds,
+            max_logged_text_chars=cfg.max_logged_text_chars,
         )
         try:
             verdict = judge.run_debate(motion=motion, rounds=rounds)
@@ -562,6 +571,10 @@ def run_live(args: argparse.Namespace, out: Any) -> int:
 
     if not args.quiet:
         _print_summary(out, verdict=verdict, run_file=logger.run_file)
+
+    if args.print_transcript:
+        print_readable_transcript(logger.run_file, out=out)
+
     return 0
 
 
@@ -586,7 +599,7 @@ def _safe_ledger_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _build_child_env(*, real_llm: bool = False) -> dict[str, str]:
+def _build_child_env(*, real_llm: bool = False, real_search: bool = False) -> dict[str, str]:
     """Return a minimal env dict for child agent subprocesses.
 
     The :class:`Supervisor` further filters this through its own
@@ -601,6 +614,10 @@ def _build_child_env(*, real_llm: bool = False) -> dict[str, str]:
     ``RealLLMClient.from_env()`` finds them) and set
     ``DEBATE_REAL_LLM=1`` to flip the child's ``__main__`` block
     to the real client.
+
+    When ``real_search=True``, set ``DEBATE_REAL_SEARCH=1`` so each
+    debater emits one brokered search ``tool_call`` on opening /
+    first argument. Search keys stay in the parent only.
     """
     env: dict[str, str] = {
         "PATH": os.environ.get("PATH", ""),
@@ -639,6 +656,9 @@ def _build_child_env(*, real_llm: bool = False) -> dict[str, str]:
             if key in os.environ:
                 env[key] = os.environ[key]
 
+    if real_search:
+        env["DEBATE_REAL_SEARCH"] = "1"
+
     src_path = Path(__file__).resolve().parents[1]
     if src_path.is_dir():
         existing = env.get("PYTHONPATH", "")
@@ -654,6 +674,7 @@ def _build_child_env(*, real_llm: bool = False) -> dict[str, str]:
 
 def main(argv: Sequence[str] | None = None, *, out: Any | None = None) -> int:
     """CLI entry point. Returns a process exit code (0 = success)."""
+    maybe_load_dotenv()
     if out is None:
         out = sys.stdout
     parser = build_parser()

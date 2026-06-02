@@ -63,7 +63,13 @@ from debate.sdk.schemas import (
     Verdict,
 )
 from debate.shared.gatekeeper import BudgetExceededError, Gatekeeper
+from debate.shared.redaction import redact
 from debate.shared.router import ToolRouter, UnknownToolError
+from debate.shared.transcript_log import (
+    DEFAULT_MAX_LOGGED_TEXT_CHARS,
+    format_transcript_dict,
+    prepare_transcript_field,
+)
 
 DEFAULT_PER_TURN_TIMEOUT_SEC: float = 30.0
 """Seconds the Judge waits for a single child reply before giving up."""
@@ -235,6 +241,9 @@ class Judge:
     receive_max_iters:
         Upper bound on ``tool_call`` iterations per turn before the
         Judge gives up and raises :class:`InvalidReplyError`.
+    max_logged_text_chars:
+        Maximum characters per string field written into the run
+        transcript. Longer values are truncated with a suffix.
     clock:
         Injectable epoch-seconds clock for deterministic ``ts``
         fields in outgoing envelopes.
@@ -259,12 +268,15 @@ class Judge:
         max_tokens_per_turn: int | None = None,
         per_turn_timeout_sec: float = DEFAULT_PER_TURN_TIMEOUT_SEC,
         receive_max_iters: int = DEFAULT_RECEIVE_MAX_ITERS,
+        max_logged_text_chars: int = DEFAULT_MAX_LOGGED_TEXT_CHARS,
         clock: Callable[[], float] = time.time,
     ) -> None:
         if per_turn_timeout_sec <= 0:
             raise ValueError("per_turn_timeout_sec must be > 0")
         if receive_max_iters < 1:
             raise ValueError("receive_max_iters must be >= 1")
+        if max_logged_text_chars < 256:
+            raise ValueError("max_logged_text_chars must be >= 256")
 
         self._supervisor: Supervisor = supervisor
         self._fsm: DebateStateMachine = fsm
@@ -275,6 +287,7 @@ class Judge:
         self._motion: str = motion
         self._per_turn_timeout_sec: float = float(per_turn_timeout_sec)
         self._receive_max_iters: int = int(receive_max_iters)
+        self._max_logged_text_chars: int = int(max_logged_text_chars)
         self._clock: Callable[[], float] = clock
 
         if max_tokens_per_turn is None:
@@ -400,12 +413,17 @@ class Judge:
         """
         prompt = self.build_prompt(role, phase, opponent_last=opponent_last)
         self._supervisor.send(role, prompt)
+        prompt_payload = dict(prompt.payload)
+        prompt_text = format_transcript_dict(prompt_payload)
         self._log(
             "prompt_sent",
             target_role=role,
             phase=phase.value,
             round=self._fsm.current_round,
             prompt_turn_id=prompt.turn_id,
+            prompt_payload=prompt_payload,
+            prompt_text=prompt_text,
+            prompt_length=len(prompt_text),
         )
 
         for _ in range(self._receive_max_iters):
@@ -433,13 +451,17 @@ class Judge:
                 continue
             if msg.type is MessageType.REPLY:
                 self.validate_child_reply(msg, expected_role=role)
+                content = msg.payload.get("content", "")
+                if not isinstance(content, str):
+                    content = str(content)
                 self._log(
                     "reply_received",
                     target_role=role,
                     phase=phase.value,
                     round=self._fsm.current_round,
                     reply_turn_id=msg.turn_id,
-                    content_length=len(msg.payload.get("content", "")),
+                    content=content,
+                    content_length=len(content),
                 )
                 return msg
 
@@ -533,6 +555,7 @@ class Judge:
             tokens_in=response.tokens_in,
             tokens_out=response.tokens_out,
             text_length=len(text),
+            verdict_text=text,
         )
         return self._parse_verdict(text)
 
@@ -565,14 +588,82 @@ class Judge:
             if not isinstance(r, str) or not r.strip():
                 raise InvalidVerdictError("each reason must be a non-empty string")
 
+    @staticmethod
+    def _verdict_scores(verdict: Verdict) -> dict[str, int]:
+        extra = verdict.model_extra or {}
+        scores = extra.get("scores")
+        if not isinstance(scores, dict):
+            return {"pro": 0, "con": 0}
+        return {"pro": int(scores.get("pro", 0)), "con": int(scores.get("con", 0))}
+
+    def _resolve_tiebreak_winner(
+        self,
+        *,
+        preferred_winner: str | None,
+        cumulative: dict[str, int] | None = None,
+    ) -> str:
+        """Pick a side when verdict scores are tied.
+
+        Prefer a valid ``preferred_winner`` (from the LLM verdict).
+        Otherwise use cumulative debate scores; on an exact cumulative
+        tie, ``con`` wins by deterministic rule.
+        """
+        if preferred_winner in _VALID_ROLE_STRINGS:
+            return preferred_winner
+        totals = cumulative if cumulative is not None else self.history.cumulative_scores
+        pro = int(totals.get("pro", 0))
+        con = int(totals.get("con", 0))
+        if pro > con:
+            return "pro"
+        return "con"
+
+    @staticmethod
+    def _adjust_scores_for_winner(scores: dict[str, int], winner: str) -> dict[str, int]:
+        """Ensure the selected winner has a strictly higher visible score."""
+        pro = int(scores["pro"])
+        con = int(scores["con"])
+        if pro != con:
+            return {"pro": pro, "con": con}
+        if winner == "pro":
+            return {"pro": pro + 1, "con": con}
+        return {"pro": pro, "con": con + 1}
+
+    @staticmethod
+    def _rebuild_verdict(
+        verdict: Verdict,
+        *,
+        winner: str,
+        scores: dict[str, int],
+    ) -> Verdict:
+        extra = dict(verdict.model_extra or {})
+        reasons = extra.get("reasons")
+        return Verdict(
+            winner=winner,
+            rationale=verdict.rationale,
+            scores=scores,
+            reasons=reasons if isinstance(reasons, list) else None,
+        )
+
+    def _finalize_verdict(self, verdict: Verdict) -> tuple[Verdict, bool, str | None]:
+        """Return a verdict whose visible scores are never tied."""
+        scores = self._verdict_scores(verdict)
+        if scores["pro"] != scores["con"]:
+            return verdict, False, None
+        winner = self._resolve_tiebreak_winner(preferred_winner=verdict.winner)
+        adjusted = self._adjust_scores_for_winner(scores, winner)
+        return self._rebuild_verdict(verdict, winner=winner, scores=adjusted), True, "scores_equal"
+
     def apply_tie_breaker(self, scores: dict[str, int]) -> Verdict:
         """Deterministic fallback verdict.
 
         Higher cumulative score wins. If the cumulative scores are
-        exactly equal, ``con`` wins by deterministic rule.
+        exactly equal, ``con`` wins by deterministic rule. Visible
+        scores are bumped by one point when still tied so the winner
+        is strictly ahead.
         """
         pro = int(scores.get("pro", 0))
         con = int(scores.get("con", 0))
+        cumulative = {"pro": pro, "con": con}
         if pro > con:
             winner = "pro"
             rationale = f"tie-break: pro cumulative score {pro} > con {con}"
@@ -584,10 +675,11 @@ class Judge:
             rationale = (
                 f"tie-break: cumulative scores equal at {pro}; con wins by deterministic rule"
             )
+        final_scores = self._adjust_scores_for_winner(cumulative, winner)
         return Verdict(
             winner=winner,
             rationale=rationale,
-            scores={"pro": pro, "con": con},
+            scores=final_scores,
             reasons=[
                 "Verdict pipeline exhausted retries; deterministic tie-break applied.",
                 rationale,
@@ -674,9 +766,16 @@ class Judge:
             try:
                 verdict = self.generate_verdict()
                 self.validate_verdict(verdict)
+                verdict, tiebreak_applied, tiebreak_reason = self._finalize_verdict(verdict)
                 self._fsm.transition(Event.JUDGE_REPLY)
                 self._fsm.transition(Event.VALID_NON_TIE)
-                self._log_verdict_record(verdict, attempt=attempts, source="llm")
+                self._log_verdict_record(
+                    verdict,
+                    attempt=attempts,
+                    source="llm",
+                    verdict_tiebreak_applied=tiebreak_applied,
+                    tiebreak_reason=tiebreak_reason,
+                )
                 return verdict
             except InvalidVerdictError as exc:
                 self._log("verdict_invalid", attempt=attempts, reason=str(exc))
@@ -685,9 +784,19 @@ class Judge:
                 if next_state is State.VERDICT:
                     continue
                 if next_state is State.TIE_BREAK:
-                    tied = self.apply_tie_breaker(self.history.cumulative_scores)
+                    cumulative = self.history.cumulative_scores
+                    tied = self.apply_tie_breaker(cumulative)
                     self._fsm.transition(Event.JUDGE_REPLY)
-                    self._log_verdict_record(tied, attempt=attempts, source="tie_break")
+                    pro = int(cumulative.get("pro", 0))
+                    con = int(cumulative.get("con", 0))
+                    scores_were_equal = pro == con
+                    self._log_verdict_record(
+                        tied,
+                        attempt=attempts,
+                        source="tie_break",
+                        verdict_tiebreak_applied=scores_were_equal,
+                        tiebreak_reason="cumulative_scores_equal" if scores_were_equal else None,
+                    )
                     return tied
                 raise InvalidVerdictError(
                     f"unexpected FSM state after invalid verdict: {next_state}"
@@ -714,7 +823,7 @@ class Judge:
                 "",
                 "Return a JSON object with EXACTLY these fields:",
                 '  "winner":   "pro" or "con" (NEVER "tie"),',
-                '  "scores":   {"pro": <int>, "con": <int>},',
+                '  "scores":   {"pro": <int>, "con": <int>} (must NOT be equal),',
                 f'  "reasons":  list of at least {MIN_VERDICT_REASONS} short strings,',
                 '  "rationale": optional one-sentence summary.',
                 "Output STRICT JSON only - no prose, no code fences.",
@@ -773,11 +882,13 @@ class Judge:
 
         payload = tool_msg.payload
         tool_name = payload.get("tool")
+        tool_call_payload = dict(payload) if isinstance(payload, dict) else {"tool": tool_name}
         self._log(
             "tool_call_received",
             target_role=role,
             tool=tool_name,
             tool_call_turn_id=tool_msg.turn_id,
+            tool_call_payload=tool_call_payload,
         )
 
         result_payload: dict[str, Any]
@@ -825,6 +936,7 @@ class Judge:
             tool=tool_name,
             tool_result_turn_id=result_msg.turn_id,
             error=result_payload.get("error"),
+            tool_result_payload=dict(result_payload),
         )
 
     # ---- bookkeeping helpers ----
@@ -879,32 +991,58 @@ class Judge:
     def _log(self, event_type: str, **fields: Any) -> None:
         if self._logger is None:
             return
+        safe_fields = redact(
+            prepare_transcript_field(fields, max_chars=self._max_logged_text_chars)
+        )
         with contextlib.suppress(Exception):
             self._logger.log(
                 role="judge",
                 turn_id=self._outgoing_turn_id,
                 event_type=event_type,
-                **fields,
+                **safe_fields,
             )
 
-    def _log_verdict_record(self, verdict: Verdict, *, attempt: int, source: str) -> None:
-        self._log(
-            "verdict_recorded",
-            attempt=attempt,
-            source=source,
+    def _log_verdict_record(
+        self,
+        verdict: Verdict,
+        *,
+        attempt: int,
+        source: str,
+        verdict_tiebreak_applied: bool = False,
+        tiebreak_reason: str | None = None,
+    ) -> None:
+        fields: dict[str, Any] = {
+            "attempt": attempt,
+            "source": source,
             **self._verdict_log_fields(verdict),
-        )
+        }
+        if verdict_tiebreak_applied:
+            fields["verdict_tiebreak_applied"] = True
+        if tiebreak_reason is not None:
+            fields["tiebreak_reason"] = tiebreak_reason
+        self._log("verdict_recorded", **fields)
 
     @staticmethod
     def _verdict_log_fields(verdict: Verdict) -> dict[str, Any]:
         extra = verdict.model_extra or {}
-        return {
+        reasons = extra.get("reasons")
+        reasons_list = reasons if isinstance(reasons, list) else []
+        payload: dict[str, Any] = {
             "winner": verdict.winner,
             "scores": extra.get("scores"),
-            "reasons_count": (
-                len(extra.get("reasons", [])) if isinstance(extra.get("reasons"), list) else 0
-            ),
+            "reasons": reasons_list,
+            "reasons_count": len(reasons_list),
+            "rationale": verdict.rationale,
         }
+        payload["verdict_text"] = format_transcript_dict(
+            {
+                "winner": verdict.winner,
+                "scores": extra.get("scores"),
+                "reasons": reasons_list,
+                "rationale": verdict.rationale,
+            }
+        )
+        return payload
 
 
 __all__ = [
